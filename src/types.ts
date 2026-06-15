@@ -15,6 +15,7 @@ export interface CropPortfolio {
   activities: Activity[];
   scanHistory?: any[];
   growthLogs?: { id: string; date: string; stage: string; height: number; notes: string }[];
+  ownerId?: string;
 }
 
 export interface Activity {

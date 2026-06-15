@@ -424,7 +424,7 @@ app.post("/api/analyze-crop", async (req, res) => {
   if (!ai) {
     console.log("No Gemini API key available, using high-fidelity offline UCC agronomy simulation");
     const simulationResult = runOfflineSimulation(cropType, language);
-    await new Promise(resolve => setTimeout(resolve, 1500));
+    await new Promise(resolve => setTimeout(resolve, 100));
     return res.json(simulationResult);
   }
 
@@ -500,17 +500,19 @@ Note: Keep 'healthStatus' as one of the exact English enum values requested ('He
         console.log(`Attempting diagnostics using model: ${targetModel}...`);
         const response = await ai.models.generateContent({
           model: targetModel,
-          contents: [
-            {
-              inlineData: {
-                mimeType,
-                data: base64Data,
+          contents: {
+            parts: [
+              {
+                inlineData: {
+                  mimeType,
+                  data: base64Data,
+                },
               },
-            },
-            {
-              text: prompt,
-            },
-          ],
+              {
+                text: prompt,
+              },
+            ],
+          },
           config: {
             responseMimeType: "application/json",
             responseSchema: {

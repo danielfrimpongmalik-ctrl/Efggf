@@ -2,6 +2,23 @@ import React, { useState, useEffect, useRef } from "react";
 import { initialCropPortfolios } from "./data";
 import { CropPortfolio, StatusType, Activity } from "./types";
 
+function deduplicatePortfolios(arr: CropPortfolio[]): CropPortfolio[] {
+  if (!arr || !Array.isArray(arr)) return [];
+  const seen = new Set<string>();
+  return arr.filter((item) => {
+    if (!item || !item.id) return false;
+    if (seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
+}
+
+function getDeterministicString(arr: CropPortfolio[]): string {
+  const deDupped = deduplicatePortfolios(arr);
+  const sorted = [...deDupped].sort((a, b) => a.id.localeCompare(b.id));
+  return JSON.stringify(sorted);
+}
+
 const translations = {
   "English (US)": {
     searchPlaceholder: "Search crop portfolios...",
@@ -246,7 +263,10 @@ const translations = {
 };
 
 export default function App() {
+  const user = null;
+  const isAuthLoading = false;
   const [activeTab, setActiveTab] = useState<"crops" | "scan" | "settings">("crops");
+  
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedCropId, setSelectedCropId] = useState<string | null>(null);
   const [portfolioViewMode, setPortfolioViewMode] = useState<"index" | "history" | "logs" | "pest_guide">("index");
@@ -327,8 +347,15 @@ export default function App() {
 
   const [cropPortfolios, setCropPortfolios] = useState<CropPortfolio[]>(() => {
     const saved = localStorage.getItem("agriscan_portfolios");
-    return saved ? JSON.parse(saved) : initialCropPortfolios;
+    const parsed = saved ? JSON.parse(saved) : initialCropPortfolios;
+    return deduplicatePortfolios(parsed);
   });
+
+  const lastSyncedPortfoliosRef = useRef<string>("");
+
+  useEffect(() => {
+    // Runs purely locally. Portfolios initialize from localStorage dynamically.
+  }, []);
   
   // Camera & Diagnostics state
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -386,7 +413,7 @@ export default function App() {
   const [newLogNotes, setNewLogNotes] = useState<string>("Observed physical development parameters look normal and stable.");
   const [isAddingGrowthLog, setIsAddingGrowthLog] = useState<boolean>(false);
 
-  const handleCreatePortfolioSubmit = (e: React.FormEvent) => {
+  const handleCreatePortfolioSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newPortfolioName.trim()) {
       showToast("Please enter a crop name", "error");
@@ -420,6 +447,7 @@ export default function App() {
     };
 
     setCropPortfolios((prev) => [newPortfolio, ...prev]);
+
     showToast(`Portfolio "${newPortfolioName}" created!`, "success");
 
     // Reset fields
@@ -448,6 +476,10 @@ export default function App() {
   const [isEditingProfile, setIsEditingProfile] = useState(false);
   const [tempName, setTempName] = useState("Thomas Miller");
   const [tempEmail, setTempEmail] = useState("t.miller@greenfield.farm");
+
+  const currentUserName = userName;
+  const currentUserEmail = userEmail;
+  const currentUserPhoto = "https://lh3.googleusercontent.com/aida-public/AB6AXuDfG1pC4cpXndz7muzlznPJE5uRod58oavdFKhU5Dtx9DA3c5Z5wtF_qJpoU3DvpI7oL6FZtEGI21vk7YlSOans4JtTFN1lwFFfTUNZg8R8X_3OZFo30lVWCEKvh4LwKZAoLTc2K9gFuLXBpZIBd4m-S3bab7x66qOV5seMVbuKH011cXeC2xwhmarowVss6ant2wFyQ-7xIwxI22t7_oOg7_BFiQOUlnQ1iwqPGEgkgbwu1Gbpg23KQWimG9fIvROzDc3A_XlFY9QJ";
   const [toast, setToast] = useState<{ message: string; type: "success" | "info" | "error" } | null>(null);
   const [pendingDeletePortfolioId, setPendingDeletePortfolioId] = useState<string | null>(null);
   const [pendingDeleteScanId, setPendingDeleteScanId] = useState<string | null>(null);
@@ -516,6 +548,11 @@ export default function App() {
 
   useEffect(() => {
     localStorage.setItem("agriscan_app_theme", appTheme);
+    if (appTheme === "dark") {
+      document.documentElement.classList.add("dark");
+    } else {
+      document.documentElement.classList.remove("dark");
+    }
   }, [appTheme]);
 
   const themes: Record<string, React.CSSProperties> = {
@@ -568,10 +605,12 @@ export default function App() {
     }
   }, [toast]);
 
-  // Save changes to localStorage
+  // Save changes to localStorage only if in guest/offline mode
   useEffect(() => {
-    localStorage.setItem("agriscan_portfolios", JSON.stringify(cropPortfolios));
-  }, [cropPortfolios]);
+    if (!user) {
+      localStorage.setItem("agriscan_portfolios", JSON.stringify(cropPortfolios));
+    }
+  }, [cropPortfolios, user]);
 
 
 
@@ -601,22 +640,83 @@ export default function App() {
   // Triggering diagnosis
   const startDiagnostics = async (imageSrc: string, cropNameHint: string) => {
     setIsScanning(true);
-    setDiagnosticsLog(["Initializing telemetry module...", "Activating multispectral sensors...", "Capturing high-contrast leaf definition..."]);
-    
-    // Simulate scanner sweep phase
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-    setDiagnosticsLog((prev) => [...prev, "Compiling raw visual matrix...", "Transmitting payload to pathology cloud..."]);
-    
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    setAnalyzing(true);
-    setIsScanning(false);
+    setAnalyzing(false);
+
+    // Dynamic localization for real-time telemetry logs
+    let initialLogs: string[] = [];
+    let stage1Logs: string[] = [];
+    let stage2Logs: string[] = [];
+
+    if (appLanguage === "Español (ES)") {
+      initialLogs = [
+        "Inicializando módulo de telemetría...",
+        "Activando sensores multiespectrales...",
+        "Capturando definición foliar de alto contraste..."
+      ];
+      stage1Logs = [
+        "Compilando matriz visual bruta...",
+        "Transmitiendo carga al servidor de patología..."
+      ];
+      stage2Logs = [
+        "Conectando a redes de patología de IA...",
+        "Evaluando márgenes celulares y de pigmento de la hoja..."
+      ];
+    } else if (appLanguage === "Français (FR)") {
+      initialLogs = [
+        "Initialisation du module de télémétrie...",
+        "Activation des capteurs multispectraux...",
+        "Capture de la définition des feuilles à haut contraste..."
+      ];
+      stage1Logs = [
+        "Compilation de la matrice visuelle brute...",
+        "Transmission de la charge utile au cloud de pathologie..."
+      ];
+      stage2Logs = [
+        "Connexion aux réseaux de pathologie IA...",
+        "Évaluation des marges cellulaires et pigmentaires des feuilles..."
+      ];
+    } else {
+      initialLogs = [
+        "Initializing telemetry module...",
+        "Activating multispectral sensors...",
+        "Capturing high-contrast leaf definition..."
+      ];
+      stage1Logs = [
+        "Compiling raw visual matrix...",
+        "Transmitting payload to pathology cloud..."
+      ];
+      stage2Logs = [
+        "Connecting to AI Pathology networks...",
+        "Evaluating leaf cellular & pigment margins..."
+      ];
+    }
+
+    setDiagnosticsLog(initialLogs);
+
+    // Fire the network call immediately in parallel to save time
+    const fetchPromise = fetch("/api/analyze-crop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image: imageSrc, cropType: cropNameHint, model: preferredModel, language: appLanguage })
+    });
+
+    // Run parallel high-speed localized step updates (minimum 400ms feedback loop)
+    const runFastVisualSequence = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      setDiagnosticsLog((prev) => [...prev, ...stage1Logs]);
+      setAnalyzing(true);
+      setIsScanning(false);
+
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      setDiagnosticsLog((prev) => [...prev, ...stage2Logs]);
+    };
 
     try {
-      const response = await fetch("/api/analyze-crop", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image: imageSrc, cropType: cropNameHint, model: preferredModel, language: appLanguage })
-      });
+      // Execute the network request and the rapid visual logs concurrently
+      const [response] = await Promise.all([
+        fetchPromise,
+        runFastVisualSequence()
+      ]);
 
       if (!response.ok) {
         throw new Error("Diagnosis server-side failure");
@@ -642,15 +742,25 @@ export default function App() {
 
     } catch (error) {
       console.error(error);
-      showToast("Pathology gateway is busy. Activating local agronomic heuristic engine...", "error");
+      const isSpanish = appLanguage === "Español (ES)";
+      const isFrench = appLanguage === "Français (FR)";
+      const errorMsg = isSpanish 
+        ? "El portal de patología está procesando muchas solicitudes. Activando motor agrícola heurístico local..."
+        : isFrench 
+        ? "La passerelle de pathologie est occupée. Activation du moteur heuristique agronomique local..."
+        : "Pathology gateway is busy. Activating local agronomic heuristic engine...";
+      
+      showToast(errorMsg, "error");
     } finally {
+      setIsScanning(false);
       setAnalyzing(false);
     }
   };
 
-  const resetAllPortfolios = () => {
+  const resetAllPortfolios = async () => {
     if (pendingReset) {
       setCropPortfolios(initialCropPortfolios);
+      localStorage.removeItem("agriscan_portfolios");
       setSelectedCropId(null);
       setScanResult(null);
       setPendingReset(false);
@@ -746,7 +856,7 @@ export default function App() {
   };
 
   // Helper to delete a crop portfolio
-  const deletePortfolio = (id: string, isBigButton: boolean = false) => {
+  const deletePortfolio = async (id: string, isBigButton: boolean = false) => {
     if (pendingDeletePortfolioId === id) {
       setCropPortfolios((prev) => prev.filter((p) => p.id !== id));
       setSelectedCropId(null);
@@ -759,7 +869,7 @@ export default function App() {
   };
 
   // Helper to delete an individual scan history record
-  const deleteScanRecord = (portfolioId: string, scanId: string) => {
+  const deleteScanRecord = async (portfolioId: string, scanId: string) => {
     if (pendingDeleteScanId === scanId) {
       setCropPortfolios((prev) =>
         prev.map((p) => {
@@ -781,7 +891,7 @@ export default function App() {
   };
 
   // Helper to append a manual growth log record to a portfolio
-  const addGrowthLog = (portfolioId: string) => {
+  const addGrowthLog = async (portfolioId: string) => {
     if (newLogHeight <= 0) {
       showToast("Please enter a valid height count", "error");
       return;
@@ -832,7 +942,7 @@ export default function App() {
   };
 
   // Helper to delete an individual growth log record
-  const deleteGrowthLog = (portfolioId: string, logId: string) => {
+  const deleteGrowthLog = async (portfolioId: string, logId: string) => {
     if (pendingDeleteLogId === logId) {
       setCropPortfolios((prev) =>
         prev.map((p) => {
@@ -972,7 +1082,7 @@ export default function App() {
     }
   };
 
-  const saveToPortfolio = () => {
+  const saveToPortfolio = async () => {
     if (!scanResult) return;
     
     if (saveTargetPortfolioId === "NEW") {
@@ -1028,59 +1138,59 @@ export default function App() {
       setSelectedCropId(newId);
     } else {
       // Append scan history record directly to selected existing portfolio
-      setCropPortfolios((prev) =>
-        prev.map((p) => {
-          if (p.id === saveTargetPortfolioId) {
-            const newScanHistoryItem = {
-              id: "hist-" + Date.now(),
-              date: "Just now",
-              cropName: scanResult.cropName || p.name,
-              pestOrDisease: scanResult.pestOrDisease || "Healthy",
-              healthStatus: scanResult.healthStatus || "Healthy",
-              severity: scanResult.severity || "Low",
-              imageUrl: scanResult.imageUrl || p.image,
-              description: scanResult.description,
-              solutions: scanResult.solutions || [],
-              botanicalName: scanResult.botanicalName || p.scienceName,
-              plantFamily: scanResult.plantFamily,
-              confidence: scanResult.confidence,
-              healthScore: scanResult.healthScore || p.healthScore,
-              aboutPlant: scanResult.aboutPlant,
-              pruningTips: scanResult.pruningTips,
-              careTips: scanResult.careTips,
-              diagnosedVia: scanResult.diagnosedVia
-            };
+      const targetCrop = cropPortfolios.find((p) => p.id === saveTargetPortfolioId);
+      if (targetCrop) {
+        const newScanHistoryItem = {
+          id: "hist-" + Date.now(),
+          date: "Just now",
+          cropName: scanResult.cropName || targetCrop.name,
+          pestOrDisease: scanResult.pestOrDisease || "Healthy",
+          healthStatus: scanResult.healthStatus || "Healthy",
+          severity: scanResult.severity || "Low",
+          imageUrl: scanResult.imageUrl || targetCrop.image,
+          description: scanResult.description,
+          solutions: scanResult.solutions || [],
+          botanicalName: scanResult.botanicalName || targetCrop.scienceName,
+          plantFamily: scanResult.plantFamily,
+          confidence: scanResult.confidence,
+          healthScore: scanResult.healthScore || targetCrop.healthScore,
+          aboutPlant: scanResult.aboutPlant,
+          pruningTips: scanResult.pruningTips,
+          careTips: scanResult.careTips,
+          diagnosedVia: scanResult.diagnosedVia
+        };
 
-            const updatedActivities: Activity[] = [
-              {
-                id: "act-scan-" + Date.now(),
-                type: (scanResult.healthStatus === "Healthy") ? "success" : "alert",
-                title: `AI Scan: ${scanResult.pestOrDisease || "Healthy"}`,
-                time: "Just now",
-                description: scanResult.description || "Diagnostic medical analysis completed."
-              },
-              ...p.activities
-            ];
+        const updatedActivities: Activity[] = [
+          {
+            id: "act-scan-" + Date.now(),
+            type: (scanResult.healthStatus === "Healthy") ? "success" : "alert",
+            title: `AI Scan: ${scanResult.pestOrDisease || "Healthy"}`,
+            time: "Just now",
+            description: scanResult.description || "Diagnostic medical analysis completed."
+          },
+          ...targetCrop.activities
+        ];
 
-            const currentScans = p.scanHistory || [];
+        const currentScans = targetCrop.scanHistory || [];
 
-            return {
-              ...p,
-              lastScan: "Just now",
-              status: scanResult.healthStatus || p.status,
-              image: scanResult.imageUrl || p.image, // Overwrite portfolio cover page with the newly scanned leaf
-              healthScore: scanResult.healthScore || (scanResult.healthStatus === "Healthy" ? 95 : (scanResult.severity === "High" ? 48 : 72)),
-              activities: updatedActivities,
-              scanHistory: [newScanHistoryItem, ...currentScans],
-              statsHistory: [
-                ...p.statsHistory,
-                { date: "Current scan", health: scanResult.healthScore || (scanResult.healthStatus === "Healthy" ? 95 : 60), moisture: p.moisture }
-              ]
-            };
-          }
-          return p;
-        })
-      );
+        const updatedCrop = {
+          ...targetCrop,
+          lastScan: "Just now",
+          status: scanResult.healthStatus || targetCrop.status,
+          image: scanResult.imageUrl || targetCrop.image, // Overwrite portfolio cover page with the newly scanned leaf
+          healthScore: scanResult.healthScore || (scanResult.healthStatus === "Healthy" ? 95 : (scanResult.severity === "High" ? 48 : 72)),
+          activities: updatedActivities,
+          scanHistory: [newScanHistoryItem, ...currentScans],
+          statsHistory: [
+            ...targetCrop.statsHistory,
+            { date: "Current scan", health: scanResult.healthScore || (scanResult.healthStatus === "Healthy" ? 95 : 60), moisture: targetCrop.moisture }
+          ]
+        };
+
+        setCropPortfolios((prev) =>
+          prev.map((p) => (p.id === saveTargetPortfolioId ? updatedCrop : p))
+        );
+      }
       setSelectedCropId(saveTargetPortfolioId);
     }
 
@@ -1090,6 +1200,8 @@ export default function App() {
     setActiveTab("crops");
   };
 
+
+
   return (
     <div 
       style={themes[appTheme] || {}} 
@@ -1097,7 +1209,7 @@ export default function App() {
     >
       
       {/* TopAppBar */}
-      {activeTab === "crops" && (
+      {activeTab === "crops" && !selectedCropId && (
         <header className="bg-surface border-b border-outline-variant flex justify-between items-center w-full px-5 h-16 sticky top-0 z-40">
           <div 
             onClick={() => {
@@ -1115,27 +1227,11 @@ export default function App() {
           </div>
           
           <div className="flex items-center gap-3">
-            {/* Simple white/dark toggle button */}
-            <button
-              onClick={() => {
-                const nextTheme = appTheme === "dark" ? "light" : "dark";
-                setAppTheme(nextTheme);
-                showToast(`Switched to ${nextTheme === "dark" ? "Dark Theme" : "Light Theme"}`, "success");
-              }}
-              className="w-9 h-9 rounded-full flex items-center justify-center border border-outline-variant hover:bg-surface-container-low transition-all active:scale-95 cursor-pointer text-on-surface"
-              title="Toggle Light/Dark Theme"
-              id="header-theme-toggle"
-            >
-              <span className="material-symbols-outlined text-[18px]">
-                {appTheme === "dark" ? "light_mode" : "dark_mode"}
-              </span>
-            </button>
-
             <div 
               onClick={() => {
                 setActiveTab("settings");
-                setTempName(userName);
-                setTempEmail(userEmail);
+                setTempName(currentUserName);
+                setTempEmail(currentUserEmail);
                 setIsEditingProfile(true);
               }}
               className="w-10 h-10 rounded-full overflow-hidden border border-outline-variant transition-transform cursor-pointer active:scale-95 flex-shrink-0"
@@ -1144,7 +1240,7 @@ export default function App() {
               <img 
                 alt="User Profile" 
                 className="w-full h-full object-cover" 
-                src="https://lh3.googleusercontent.com/aida-public/AB6AXuDfG1pC4cpXndz7muzlznPJE5uRod58oavdFKhU5Dtx9DA3c5Z5wtF_qJpoU3DvpI7oL6FZtEGI21vk7YlSOans4JtTFN1lwFFfTUNZg8R8X_3OZFo30lVWCEKvh4LwKZAoLTc2K9gFuLXBpZIBd4m-S3bab7x66qOV5seMVbuKH011cXeC2xwhmarowVss6ant2wFyQ-7xIwxI22t7_oOg7_BFiQOUlnQ1iwqPGEgkgbwu1Gbpg23KQWimG9fIvROzDc3A_XlFY9QJ"
+                src={currentUserPhoto}
               />
             </div>
           </div>
@@ -1347,7 +1443,7 @@ export default function App() {
                       {/* View History */}
                       <button 
                         onClick={() => setPortfolioViewMode("history")}
-                        className="flex flex-col items-center justify-center gap-1.5 p-3 bg-white border border-outline-variant text-on-surface rounded-xl notepad-shadow active:scale-95 transition-transform hover:bg-surface-container-low"
+                        className="flex flex-col items-center justify-center gap-1.5 p-3 bg-surface-container-lowest border border-outline-variant text-on-surface rounded-xl notepad-shadow active:scale-95 transition-transform hover:bg-surface-container-low"
                         id="action-view-history"
                       >
                         <span className="material-symbols-outlined text-2xl text-secondary">history</span>
@@ -1357,7 +1453,7 @@ export default function App() {
                       {/* Growth Logs */}
                       <button 
                         onClick={() => setPortfolioViewMode("logs")}
-                        className="flex flex-col items-center justify-center gap-1.5 p-3 bg-white border border-outline-variant text-on-surface rounded-xl notepad-shadow active:scale-95 transition-transform hover:bg-surface-container-low"
+                        className="flex flex-col items-center justify-center gap-1.5 p-3 bg-surface-container-lowest border border-outline-variant text-on-surface rounded-xl notepad-shadow active:scale-95 transition-transform hover:bg-surface-container-low"
                         id="action-growth-logs"
                       >
                         <span className="material-symbols-outlined text-2xl text-secondary">insert_chart</span>
@@ -1367,7 +1463,7 @@ export default function App() {
                       {/* Pest Guide */}
                       <button 
                         onClick={() => setPortfolioViewMode("pest_guide")}
-                        className="flex flex-col items-center justify-center gap-1.5 p-3 bg-white border border-outline-variant text-on-surface rounded-xl notepad-shadow active:scale-95 transition-transform hover:bg-surface-container-low"
+                        className="flex flex-col items-center justify-center gap-1.5 p-3 bg-surface-container-lowest border border-outline-variant text-on-surface rounded-xl notepad-shadow active:scale-95 transition-transform hover:bg-surface-container-low"
                         id="action-pest-guide"
                       >
                         <span className="material-symbols-outlined text-2xl text-secondary">menu_book</span>
@@ -1375,109 +1471,7 @@ export default function App() {
                       </button>
                     </section>
 
-                    {portfolioViewMode === "index" && (
-                      <>
-                        {/* Stats Bar */}
-                        <div className="grid grid-cols-3 gap-2 p-4 bg-secondary-container/60 rounded-xl mb-6 border border-outline-variant/30 text-primary animate-fadeIn" id="crop-stats-bar">
-                          <div className="text-center border-r border-outline-variant/30">
-                            <p className="text-[10px] font-bold tracking-wider uppercase text-on-secondary-container">{t("healthScore")}</p>
-                            <p className="text-xl font-bold mt-0.5">{selectedCrop.healthScore}%</p>
-                          </div>
-                          <div className="text-center border-r border-outline-variant/30">
-                            <p className="text-[10px] font-bold tracking-wider uppercase text-on-secondary-container">{t("moisture")}</p>
-                            <p className="text-xl font-bold mt-0.5">{selectedCrop.moisture}%</p>
-                          </div>
-                          <div className="text-center">
-                            <p className="text-[10px] font-bold tracking-wider uppercase text-on-secondary-container">{t("estYield")}</p>
-                            <p className="text-xl font-bold mt-0.5">{selectedCrop.estYield}</p>
-                          </div>
-                        </div>
 
-                        {/* Recent Activity */}
-                        <section className="bg-white border border-outline-variant rounded-2xl p-4 shadow-sm mb-6" id="activity-timeline-section">
-                          <div className="flex items-center justify-between mb-3">
-                            <h3 className="text-sm font-bold text-primary font-sans uppercase tracking-wider">{t("recentActivity")}</h3>
-                            <span className="material-symbols-outlined text-outline cursor-pointer" onClick={() => alert("Activity metrics are synchronized.")}>more_vert</span>
-                          </div>
-                          
-                          <div className="flex flex-col gap-3">
-                            {selectedCrop.activities.map((act) => {
-                              const isAlert = act.type === "alert" || act.type === "warning";
-                              return (
-                                <div 
-                                  key={act.id} 
-                                  className={`flex gap-3 items-start p-3 rounded-xl border ${isAlert ? "bg-error-container/20 border-error/20" : "bg-primary-container/15 border-primary-container/25"}`}
-                                >
-                                  <div className={`p-1.5 rounded-full flex items-center justify-center ${isAlert ? "bg-error text-white" : "bg-primary text-white"}`}>
-                                    <span className="material-symbols-outlined text-base">
-                                      {isAlert ? "warning" : "check_circle"}
-                                    </span>
-                                  </div>
-                                  <div className="flex-1">
-                                    <div className="flex justify-between items-baseline">
-                                      <p className={`text-xs font-bold leading-tight ${isAlert ? "text-error" : "text-primary"}`}>{act.title}</p>
-                                      <span className="text-[10px] text-on-surface-variant font-semibold tracking-tight whitespace-nowrap">{act.time}</span>
-                                    </div>
-                                    <p className="text-xs text-on-surface-variant font-medium mt-1 leading-normal">{act.description}</p>
-                                    {act.analysisLink && (
-                                      <button 
-                                        onClick={() => openExpertChat(act.title)}
-                                        className="mt-2 text-xs font-bold text-primary underline underline-offset-2 hover:text-secondary block"
-                                      >
-                                        {t("chatWithPathologist")}
-                                      </button>
-                                    )}
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </section>
-
-                        {/* Growth Timeline Component */}
-                        <section className="mb-6 bg-surface-container-low p-4 rounded-2xl border border-outline-variant" id="growth-timeline">
-                          <h3 className="text-xs font-bold text-primary mb-4 uppercase tracking-wider">
-                            {appLanguage === "Español (ES)" ? "Línea de tiempo de crecimiento" :
-                             appLanguage === "Français (FR)" ? "Chronologie de croissance" :
-                             "Growth Stage Timeline"}
-                          </h3>
-                          
-                          {/* Asymmetric layout of stages */}
-                          <div className="flex items-center justify-between gap-1 mb-4 relative">
-                            {/* Connecting background progress lines */}
-                            <div className="absolute left-0 right-0 h-1 bg-outline-variant top-1/2 -translate-y-1/2 z-0"></div>
-                            
-                            {["Seedling", "Vegetative", "Tasseling", "Grain Fill", "Maturity"].map((stage, sIdx, sArr) => {
-                              const stages = ["Seedling", "Vegetative", "Tasseling", "Grain Fill", "Maturity"];
-                              const currentIdx = stages.indexOf(selectedCrop.growthStage);
-                              const isCompleted = sIdx < currentIdx;
-                              const isActive = sIdx === currentIdx;
-                              
-                              return (
-                                <div key={stage} className="flex-1 relative z-10 flex flex-col items-center">
-                                  <div 
-                                    className={`w-8 h-8 rounded-full flex items-center justify-center border-4 border-background transition-colors ${
-                                      isActive 
-                                        ? "bg-primary text-white" 
-                                        : (isCompleted ? "bg-secondary text-white" : "bg-surface-container-highest text-outline")
-                                    }`}
-                                  >
-                                    {isActive ? (
-                                      <span className="material-symbols-outlined text-[12px] font-bold">potted_plant</span>
-                                    ) : (
-                                      <span className="text-[10px] font-bold font-mono">{sIdx + 1}</span>
-                                    )}
-                                  </div>
-                                  <span className={`text-[9px] font-bold mt-1.5 whitespace-nowrap tracking-tighter ${isActive ? "text-primary scale-105" : "text-on-surface-variant"}`}>
-                                    {translateGrowthStage(stage)}
-                                  </span>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </section>
-                      </>
-                    )}
 
                     {/* Growth Logs Section */}
                     {portfolioViewMode === "logs" && (
@@ -1509,7 +1503,7 @@ export default function App() {
                                 <select 
                                   value={newLogStage}
                                   onChange={(e) => setNewLogStage(e.target.value)}
-                                  className="w-full bg-white h-9 px-2 border border-outline-variant rounded-xl text-xs outline-none font-semibold cursor-pointer text-on-surface"
+                                  className="w-full bg-surface-container h-9 px-2 border border-outline-variant rounded-xl text-xs outline-none font-semibold cursor-pointer text-on-surface"
                                 >
                                   <option value="Seedling">{translateGrowthStage("Seedling")}</option>
                                   <option value="Vegetative">{translateGrowthStage("Vegetative")}</option>
@@ -1527,7 +1521,7 @@ export default function App() {
                                   type="number"
                                   value={newLogHeight}
                                   onChange={(e) => setNewLogHeight(Number(e.target.value))}
-                                  className="w-full bg-white h-9 px-2 border border-outline-variant rounded-xl text-xs outline-none font-bold text-on-surface"
+                                  className="w-full bg-surface-container h-9 px-2 border border-outline-variant rounded-xl text-xs outline-none font-bold text-on-surface"
                                   min="1"
                                   max="1000"
                                 />
@@ -1542,7 +1536,7 @@ export default function App() {
                                 value={newLogNotes}
                                 onChange={(e) => setNewLogNotes(e.target.value)}
                                 rows={2}
-                                className="w-full bg-white p-2 border border-outline-variant rounded-xl text-xs outline-none font-medium leading-normal text-on-surface focus:ring-1 focus:ring-primary/20"
+                                className="w-full bg-surface-container p-2 border border-outline-variant rounded-xl text-xs outline-none font-medium leading-normal text-on-surface focus:ring-1 focus:ring-primary/20"
                                 placeholder={
                                   appLanguage === "Español (ES)" ? "Describa el follaje, colores, distancia entre hojas o anomalías..." :
                                   appLanguage === "Français (FR)" ? "Décrire l'état du feuillage, les couleurs ou les anomalies de croissance..." :
@@ -2388,77 +2382,96 @@ export default function App() {
             
             {/* Profile Section */}
             <section className="mb-6 mt-1">
-              <div className="bg-surface-container-lowest p-5 rounded-2xl border border-outline-variant flex items-center gap-4">
-                <div className="w-16 h-16 rounded-full overflow-hidden flex-shrink-0 border border-outline-variant">
-                  <img 
-                    alt="User profile photo" 
-                    className="w-full h-full object-cover" 
-                    src="https://lh3.googleusercontent.com/aida-public/AB6AXuDfG1pC4cpXndz7muzlznPJE5uRod58oavdFKhU5Dtx9DA3c5Z5wtF_qJpoU3DvpI7oL6FZtEGI21vk7YlSOans4JtTFN1lwFFfTUNZg8R8X_3OZFo30lVWCEKvh4LwKZAoLTc2K9gFuLXBpZIBd4m-S3bab7x66qOV5seMVbuKH011cXeC2xwhmarowVss6ant2wFyQ-7xIwxI22t7_oOg7_BFiQOUlnQ1iwqPGEgkgbwu1Gbpg23KQWimG9fIvROzDc3A_XlFY9QJ" 
-                  />
-                </div>
-                
-                {!isEditingProfile ? (
-                  <div className="flex-grow min-w-0">
-                    <h3 className="font-sans text-lg font-bold text-on-surface truncate">{userName}</h3>
-                    <p className="font-sans text-xs text-on-surface-variant truncate font-medium">{userEmail}</p>
-                  </div>
-                ) : (
-                  <div className="flex-grow flex flex-col gap-1.5 min-w-0">
-                    <input 
-                      type="text" 
-                      value={tempName} 
-                      onChange={(e) => setTempName(e.target.value)} 
-                      placeholder="Thomas Miller"
-                      className="w-full h-8 px-2 bg-surface-container border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary rounded-lg text-xs outline-none font-bold"
-                    />
-                    <input 
-                      type="email" 
-                      value={tempEmail} 
-                      onChange={(e) => setTempEmail(e.target.value)} 
-                      placeholder="t.miller@greenfield.farm"
-                      className="w-full h-8 px-2 bg-surface-container border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary rounded-lg text-xs outline-none"
+              <div className="bg-surface-container-lowest p-5 rounded-2xl border border-outline-variant">
+                <div className="flex items-center gap-4">
+                  <div className="w-16 h-16 rounded-full overflow-hidden flex-shrink-0 border border-outline-variant bg-surface-container">
+                    <img 
+                      alt="User profile photo" 
+                      className="w-full h-full object-cover" 
+                      src={currentUserPhoto} 
                     />
                   </div>
-                )}
-
-                <div className="flex-shrink-0">
+                  
                   {!isEditingProfile ? (
-                    <button 
-                      onClick={() => {
-                        setTempName(userName);
-                        setTempEmail(userEmail);
-                        setIsEditingProfile(true);
-                      }}
-                      className="w-10 h-10 rounded-full flex items-center justify-center hover:bg-surface-container-high transition-all active:scale-95 text-outline"
-                    >
-                      <span className="material-symbols-outlined text-lg">edit</span>
-                    </button>
+                    <div className="flex-grow min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <h3 className="font-sans text-lg font-bold text-on-surface truncate">{currentUserName}</h3>
+                        {user && (
+                          <span className="material-symbols-outlined text-primary text-lg" title="Verified Google Account">verified</span>
+                        )}
+                      </div>
+                      <p className="font-sans text-xs text-on-surface-variant truncate font-medium">{currentUserEmail}</p>
+                      {user && (
+                        <div className="flex items-center gap-1 text-[10px] text-emerald-600 font-bold bg-emerald-50 dark:bg-emerald-950/30 px-2 py-0.5 rounded-full w-fit mt-1 border border-emerald-100 dark:border-emerald-900/30">
+                          <span className="material-symbols-outlined text-[10px]">cloud_done</span>
+                          Cloud Sync Active
+                        </div>
+                      )}
+                    </div>
                   ) : (
-                    <div className="flex flex-col gap-1">
-                      <button 
-                        onClick={() => {
-                          if (tempName.trim() && tempEmail.trim()) {
-                            setUserName(tempName);
-                            setUserEmail(tempEmail);
-                            setIsEditingProfile(false);
-                            showToast("Profile details updated successfully", "success");
-                          } else {
-                            showToast("Name and email cannot be empty", "error");
-                          }
-                        }}
-                        className="px-2 py-1 bg-primary text-white font-bold text-[10px] rounded-lg active:scale-95 transition-all text-center"
-                      >
-                        Save
-                      </button>
-                      <button 
-                        onClick={() => setIsEditingProfile(false)}
-                        className="px-2 py-1 bg-surface-container-high text-on-surface-variant font-bold text-[10px] rounded-lg active:scale-95 transition-all text-center"
-                      >
-                        Cancel
-                      </button>
+                    <div className="flex-grow flex flex-col gap-1.5 min-w-0">
+                      <input 
+                        type="text" 
+                        value={tempName} 
+                        onChange={(e) => setTempName(e.target.value)} 
+                        placeholder="Thomas Miller"
+                        disabled={!!user}
+                        className="w-full h-8 px-2 bg-surface-container border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary rounded-lg text-xs outline-none font-bold disabled:opacity-55"
+                      />
+                      <input 
+                        type="email" 
+                        value={tempEmail} 
+                        onChange={(e) => setTempEmail(e.target.value)} 
+                        placeholder="t.miller@greenfield.farm"
+                        disabled={!!user}
+                        className="w-full h-8 px-2 bg-surface-container border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary rounded-lg text-xs outline-none disabled:opacity-55"
+                      />
                     </div>
                   )}
+
+                  <div className="flex-shrink-0">
+                    {!user ? (
+                      !isEditingProfile ? (
+                        <button 
+                          onClick={() => {
+                            setTempName(currentUserName);
+                            setTempEmail(currentUserEmail);
+                            setIsEditingProfile(true);
+                          }}
+                          className="w-10 h-10 rounded-full flex items-center justify-center hover:bg-surface-container-high transition-all active:scale-95 text-outline"
+                        >
+                          <span className="material-symbols-outlined text-lg">edit</span>
+                        </button>
+                      ) : (
+                        <div className="flex flex-col gap-1">
+                          <button 
+                            onClick={() => {
+                              if (tempName.trim() && tempEmail.trim()) {
+                                setUserName(tempName);
+                                setUserEmail(tempEmail);
+                                setIsEditingProfile(false);
+                                showToast("Profile details updated successfully", "success");
+                              } else {
+                                showToast("Name and email cannot be empty", "error");
+                              }
+                            }}
+                            className="px-2 py-1 bg-primary text-white font-bold text-[10px] rounded-lg active:scale-95 transition-all text-center"
+                          >
+                            Save
+                          </button>
+                          <button 
+                            onClick={() => setIsEditingProfile(false)}
+                            className="px-2 py-1 bg-surface-container-high text-on-surface-variant font-bold text-[10px] rounded-lg active:scale-95 transition-all text-center"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      )
+                    ) : null}
+                  </div>
                 </div>
+
+
               </div>
             </section>
 
@@ -2631,7 +2644,7 @@ export default function App() {
       {/* Expert Chat Overlay Drawer */}
       {isChatOpen && (
         <div className="fixed inset-x-0 bottom-0 top-0 bg-black/60 backdrop-blur-sm z-50 flex items-end justify-center px-4 animate-fadeIn" id="expert-chat-drawer">
-          <div className="bg-white rounded-t-2xl max-w-md w-full h-[85vh] flex flex-col shadow-2xl overflow-hidden border-t-2 border-primary">
+          <div className="bg-surface-container-lowest rounded-t-2xl max-w-md w-full h-[85vh] flex flex-col shadow-2xl overflow-hidden border-t-2 border-primary">
             
             {/* Drawer Header */}
             <div className="p-4 bg-surface border-b border-outline-variant flex justify-between items-center shrink-0">
@@ -2682,7 +2695,7 @@ export default function App() {
               <input 
                 type="text"
                 placeholder="Type your agronomical query..."
-                className="flex-grow h-11 px-3 bg-white border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary rounded-xl text-xs outline-none"
+                className="flex-grow h-11 px-3 bg-surface-container border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary rounded-xl text-xs outline-none text-on-surface"
                 value={newMessageText}
                 onChange={(e) => setNewMessageText(e.target.value)}
               />
@@ -2702,13 +2715,13 @@ export default function App() {
       {/* Create Portfolio Overlay Drawer */}
       {isCreatePortfolioOpen && (
         <div className="fixed inset-x-0 bottom-0 top-0 bg-black/60 backdrop-blur-sm z-50 flex items-end justify-center px-4 animate-fadeIn" id="create-portfolio-drawer">
-          <div className="bg-white rounded-t-3xl max-w-md w-full h-[85vh] flex flex-col shadow-2xl overflow-hidden border-t-4 border-emerald-500">
+          <div className="bg-surface-container-lowest rounded-t-3xl max-w-md w-full h-[85vh] flex flex-col shadow-2xl overflow-hidden border-t-4 border-emerald-500">
             
             {/* Drawer Header */}
             <div className="p-4 bg-surface border-b border-outline-variant flex justify-between items-center shrink-0">
               <div className="flex items-center gap-3">
-                <div className="w-9 h-9 rounded-full bg-emerald-105 flex items-center justify-center border border-emerald-200 shrink-0">
-                  <span className="material-symbols-outlined text-emerald-600 text-base">potted_plant</span>
+                <div className="w-9 h-9 rounded-full bg-emerald-100 dark:bg-emerald-950/40 flex items-center justify-center border border-emerald-200 dark:border-emerald-800/30 shrink-0">
+                  <span className="material-symbols-outlined text-emerald-600 dark:text-emerald-400 text-base">potted_plant</span>
                 </div>
                 <div>
                   <h4 className="text-sm font-black text-primary">New Crop Portfolio</h4>
@@ -2731,12 +2744,12 @@ export default function App() {
               
               {/* Crop Name */}
               <div className="flex flex-col gap-1.5">
-                <label className="text-[10px] font-black uppercase tracking-wider text-zinc-500 font-bold">Portfolio Crop Name *</label>
+                <label className="text-[10px] font-black uppercase tracking-wider text-on-surface-variant font-bold">Portfolio Crop Name *</label>
                 <input 
                   type="text"
                   required
                   placeholder="e.g., Sweet Bell Peppers"
-                  className="w-full h-11 px-3 bg-white border border-outline-variant focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 rounded-xl text-xs outline-none font-semibold transition-all"
+                  className="w-full h-11 px-3 bg-surface-container border border-outline-variant focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 rounded-xl text-xs outline-none font-semibold transition-all text-on-surface"
                   value={newPortfolioName}
                   onChange={(e) => setNewPortfolioName(e.target.value)}
                   id="input-portfolio-name"
@@ -2745,11 +2758,11 @@ export default function App() {
 
               {/* Botanical Name */}
               <div className="flex flex-col gap-1.5">
-                <label className="text-[10px] font-black uppercase tracking-wider text-zinc-500 font-bold">Botanical Scientific Name (Optional)</label>
+                <label className="text-[10px] font-black uppercase tracking-wider text-on-surface-variant font-bold">Botanical Scientific Name (Optional)</label>
                 <input 
                   type="text"
                   placeholder="e.g., Capsicum annuum"
-                  className="w-full h-11 px-3 bg-white border border-outline-variant focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 rounded-xl text-xs outline-none font-semibold transition-all"
+                  className="w-full h-11 px-3 bg-surface-container border border-outline-variant focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 rounded-xl text-xs outline-none font-semibold transition-all text-on-surface"
                   value={newPortfolioScienceName}
                   onChange={(e) => setNewPortfolioScienceName(e.target.value)}
                   id="input-portfolio-science"
@@ -2759,27 +2772,27 @@ export default function App() {
               {/* Growth Stage and Est Yield Row */}
               <div className="grid grid-cols-2 gap-3">
                 <div className="flex flex-col gap-1.5">
-                  <label className="text-[10px] font-black uppercase tracking-wider text-zinc-500 font-bold">Growth Stage</label>
+                  <label className="text-[10px] font-black uppercase tracking-wider text-on-surface-variant font-bold">Growth Stage</label>
                   <select 
-                    className="w-full h-11 px-2 bg-white border border-outline-variant focus:border-emerald-500 rounded-xl text-xs outline-none font-semibold transition-all"
+                    className="w-full h-11 px-2 bg-surface-container border border-outline-variant focus:border-emerald-500 rounded-xl text-xs outline-none font-semibold transition-all text-on-surface animate-scaleUp"
                     value={newPortfolioStage}
                     onChange={(e) => setNewPortfolioStage(e.target.value)}
                     id="select-portfolio-stage"
                   >
-                    <option value="Seedling">Seedling</option>
-                    <option value="Vegetative">Vegetative</option>
-                    <option value="Tasseling">Tasseling</option>
-                    <option value="Grain Fill">Grain Fill</option>
-                    <option value="Maturity">Maturity</option>
+                    <option value="Seedling" className="bg-surface text-on-surface">Seedling</option>
+                    <option value="Vegetative" className="bg-surface text-on-surface">Vegetative</option>
+                    <option value="Tasseling" className="bg-surface text-on-surface">Tasseling</option>
+                    <option value="Grain Fill" className="bg-surface text-on-surface">Grain Fill</option>
+                    <option value="Maturity" className="bg-surface text-on-surface">Maturity</option>
                   </select>
                 </div>
 
                 <div className="flex flex-col gap-1.5">
-                  <label className="text-[10px] font-black uppercase tracking-wider text-zinc-500 font-bold">Estimated Yield</label>
+                  <label className="text-[10px] font-black uppercase tracking-wider text-on-surface-variant font-bold">Estimated Yield</label>
                   <input 
                     type="text"
                     placeholder="e.g., 2.5t"
-                    className="w-full h-11 px-3 bg-white border border-outline-variant focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 rounded-xl text-xs outline-none font-semibold transition-all"
+                    className="w-full h-11 px-3 bg-surface-container border border-outline-variant focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 rounded-xl text-xs outline-none font-semibold transition-all text-on-surface"
                     value={newPortfolioEstYield}
                     onChange={(e) => setNewPortfolioEstYield(e.target.value)}
                     id="input-portfolio-yield"
@@ -2790,14 +2803,14 @@ export default function App() {
               {/* Slider for soil moisture */}
               <div className="flex flex-col gap-1.5 py-1">
                 <div className="flex justify-between items-center">
-                  <label className="text-[10px] font-black uppercase tracking-wider text-zinc-500 font-bold">Target Soil Moisture</label>
+                  <label className="text-[10px] font-black uppercase tracking-wider text-on-surface-variant font-bold">Target Soil Moisture</label>
                   <span className="text-xs font-bold text-emerald-600">{newPortfolioMoisture}%</span>
                 </div>
                 <input 
                   type="range"
                   min="10"
                   max="90"
-                  className="w-full accent-emerald-500 cursor-pointer h-2 bg-zinc-200 rounded-lg appearance-none"
+                  className="w-full accent-emerald-500 cursor-pointer h-2 bg-surface-container rounded-lg appearance-none"
                   value={newPortfolioMoisture}
                   onChange={(e) => setNewPortfolioMoisture(Number(e.target.value))}
                   id="input-portfolio-moisture"
@@ -2806,11 +2819,11 @@ export default function App() {
 
               {/* Custom Image selection list */}
               <div className="flex flex-col gap-2">
-                <label className="text-[10px] font-black uppercase tracking-wider text-zinc-500 font-bold">Thumbnail Image Cover *</label>
+                <label className="text-[10px] font-black uppercase tracking-wider text-on-surface-variant font-bold">Thumbnail Image Cover *</label>
                 <div className="grid grid-cols-4 gap-2.5 font-bold">
                   
                   {/* Upload own cover page image option */}
-                  <div className="relative aspect-square rounded-xl overflow-hidden border border-dashed border-zinc-300 flex flex-col items-center justify-center bg-zinc-50 hover:bg-zinc-100 hover:border-emerald-500 transition-all cursor-pointer">
+                  <div className="relative aspect-square rounded-xl overflow-hidden border border-dashed border-outline-variant flex flex-col items-center justify-center bg-surface-container hover:bg-surface-container-high hover:border-emerald-500 transition-all cursor-pointer">
                     <input 
                       type="file" 
                       accept="image/*" 
@@ -2818,8 +2831,8 @@ export default function App() {
                       className="absolute inset-0 opacity-0 cursor-pointer text-[0px]"
                       id="input-portfolio-cover-file"
                     />
-                    <span className="material-symbols-outlined text-zinc-500 text-base">add_a_photo</span>
-                    <span className="text-[8px] text-zinc-500 font-black mt-1 uppercase text-center leading-none">Upload Own</span>
+                    <span className="material-symbols-outlined text-on-surface-variant text-base">add_a_photo</span>
+                    <span className="text-[8px] text-on-surface-variant font-black mt-1 uppercase text-center leading-none">Upload Own</span>
                   </div>
 
                   {[
@@ -2832,8 +2845,8 @@ export default function App() {
                       key={preset.name}
                       type="button"
                       onClick={() => setNewPortfolioImage(preset.url)}
-                      className={`relative aspect-square rounded-xl overflow-hidden border border-zinc-200 transition-all ${
-                        newPortfolioImage === preset.url ? "ring-2 ring-emerald-500 scale-95 shadow-md border-transparent" : "opacity-75 hover:opacity-100"
+                      className={`relative aspect-square rounded-xl overflow-hidden border border-outline-variant/50 transition-all ${
+                        newPortfolioImage === preset.url ? "ring-2 ring-emerald-500 scale-95 shadow-md border-transparent animate-pulse" : "opacity-75 hover:opacity-100"
                       }`}
                     >
                       <img src={preset.url} alt={preset.name} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
@@ -2864,7 +2877,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => setIsCreatePortfolioOpen(false)}
-                  className="flex-1 h-12 bg-zinc-100 text-zinc-700 hover:bg-zinc-200 rounded-xl text-xs font-bold transition-all active:scale-95"
+                  className="flex-1 h-12 bg-surface-container hover:bg-surface-container-high text-on-surface-variant rounded-xl text-xs font-bold transition-all active:scale-95 border border-outline-variant"
                 >
                   Cancel
                 </button>
@@ -2900,7 +2913,7 @@ export default function App() {
       {/* Support Chat Overlay Drawer */}
       {isSupportChatOpen && (
         <div className="fixed inset-x-0 bottom-0 top-0 bg-black/60 backdrop-blur-sm z-50 flex items-end justify-center px-4 animate-fadeIn" id="support-chat-drawer">
-          <div className="bg-white rounded-t-2xl max-w-md w-full h-[85vh] flex flex-col shadow-2xl overflow-hidden border-t-2 border-primary">
+          <div className="bg-surface-container-lowest rounded-t-2xl max-w-md w-full h-[85vh] flex flex-col shadow-2xl overflow-hidden border-t-2 border-primary">
             
             {/* Drawer Header */}
             <div className="p-4 bg-surface border-b border-outline-variant flex justify-between items-center shrink-0">
