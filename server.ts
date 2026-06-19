@@ -1,6 +1,5 @@
 import express from "express";
 import path from "path";
-import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
 
@@ -556,7 +555,7 @@ Note: Keep 'healthStatus' as one of the exact English enum values requested ('He
                   description: "Percentage string estimating identification confidence, e.g. '88%' or '92%'.",
                 },
                 healthScore: {
-                  type: Type.INTEGER,
+                  type: Type.NUMBER,
                   description: "Calculated numeric health marker scoring from 0 to 100 based on status.",
                 },
                 aboutPlant: {
@@ -709,6 +708,7 @@ Keep your answers professional, concise, encouraging, and clear. Do not speak ab
 
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",

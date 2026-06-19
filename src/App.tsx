@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useRef } from "react";
 import { initialCropPortfolios } from "./data";
 import { CropPortfolio, StatusType, Activity } from "./types";
+import { auth, db, handleFirestoreError, OperationType } from "./firebase";
+import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut, User } from "firebase/auth";
+import { collection, doc, setDoc, deleteDoc, onSnapshot, query, where } from "firebase/firestore";
 
 function deduplicatePortfolios(arr: CropPortfolio[]): CropPortfolio[] {
   if (!arr || !Array.isArray(arr)) return [];
@@ -263,8 +266,32 @@ const translations = {
 };
 
 export default function App() {
-  const user = null;
-  const isAuthLoading = false;
+  const [user, setUser] = useState<User | null>(null);
+  const [isAuthLoading, setIsAuthLoading] = useState(true);
+
+  // Authenticate with Google popup
+  const handleGoogleSignIn = async () => {
+    const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: "select_account" });
+    try {
+      const result = await signInWithPopup(auth, provider);
+      setUser(result.user);
+      showToast(`Welcome back, ${result.user.displayName || "Farmer"}!`, "success");
+    } catch (error) {
+      console.error("Google Sign-in failed:", error);
+      showToast("Google Sign-In failed or was cancelled.", "error");
+    }
+  };
+
+  // Listen for Auth changes
+  useEffect(() => {
+    const unsubAuth = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setIsAuthLoading(false);
+    });
+    return () => unsubAuth();
+  }, []);
+
   const [activeTab, setActiveTab] = useState<"crops" | "scan" | "settings">("crops");
   
   const [searchQuery, setSearchQuery] = useState("");
@@ -345,17 +372,48 @@ export default function App() {
     }
   };
 
-  const [cropPortfolios, setCropPortfolios] = useState<CropPortfolio[]>(() => {
-    const saved = localStorage.getItem("agriscan_portfolios");
-    const parsed = saved ? JSON.parse(saved) : initialCropPortfolios;
-    return deduplicatePortfolios(parsed);
-  });
+  const [cropPortfolios, setCropPortfolios] = useState<CropPortfolio[]>([]);
+
+  // System Sync Engine: Real-time Cloud database binding with secure local-offline fallback
+  useEffect(() => {
+    if (user) {
+      const q = query(collection(db, "portfolios"), where("ownerId", "==", user.uid));
+      const unsubscribeSnap = onSnapshot(q, (snapshot) => {
+        const cloudList: CropPortfolio[] = [];
+        snapshot.forEach((docSnap) => {
+          cloudList.push(docSnap.data() as CropPortfolio);
+        });
+        setCropPortfolios(deduplicatePortfolios(cloudList));
+      }, (err) => {
+        handleFirestoreError(err, OperationType.GET, "portfolios");
+      });
+      return () => unsubscribeSnap();
+    } else {
+      // Local recovery
+      try {
+        const saved = localStorage.getItem("agriscan_portfolios");
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (Array.isArray(parsed)) {
+            setCropPortfolios(deduplicatePortfolios(parsed));
+            return;
+          }
+        }
+      } catch (e) {
+        console.error("Error loading portfolios from localStorage:", e);
+      }
+      setCropPortfolios([]);
+    }
+  }, [user]);
+
+  // Save changes to localstorage if offline guest mode
+  useEffect(() => {
+    if (!user && cropPortfolios.length > 0) {
+      localStorage.setItem("agriscan_portfolios", JSON.stringify(cropPortfolios));
+    }
+  }, [cropPortfolios, user]);
 
   const lastSyncedPortfoliosRef = useRef<string>("");
-
-  useEffect(() => {
-    // Runs purely locally. Portfolios initialize from localStorage dynamically.
-  }, []);
   
   // Camera & Diagnostics state
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -446,9 +504,18 @@ export default function App() {
       ]
     };
 
-    setCropPortfolios((prev) => [newPortfolio, ...prev]);
-
-    showToast(`Portfolio "${newPortfolioName}" created!`, "success");
+    if (user) {
+      newPortfolio.ownerId = user.uid;
+      try {
+        await setDoc(doc(db, "portfolios", newID), newPortfolio);
+        showToast(`Portfolio "${newPortfolioName}" synced to cloud!`, "success");
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, `portfolios/${newID}`);
+      }
+    } else {
+      setCropPortfolios((prev) => [newPortfolio, ...prev]);
+      showToast(`Portfolio "${newPortfolioName}" created!`, "success");
+    }
 
     // Reset fields
     setNewPortfolioName("");
@@ -759,15 +826,30 @@ export default function App() {
 
   const resetAllPortfolios = async () => {
     if (pendingReset) {
-      setCropPortfolios(initialCropPortfolios);
-      localStorage.removeItem("agriscan_portfolios");
-      setSelectedCropId(null);
-      setScanResult(null);
-      setPendingReset(false);
-      showToast("App data reset to factory defaults", "info");
+      if (user) {
+        try {
+          await signOut(auth);
+          setPendingReset(false);
+          showToast("Signed out successfully from Google account", "success");
+        } catch (err) {
+          console.error("Sign out fail:", err);
+          showToast("Sign out failed", "error");
+        }
+      } else {
+        setCropPortfolios(initialCropPortfolios);
+        localStorage.removeItem("agriscan_portfolios");
+        setSelectedCropId(null);
+        setScanResult(null);
+        setPendingReset(false);
+        showToast("App data reset to factory defaults", "info");
+      }
     } else {
       setPendingReset(true);
-      showToast("Tap button again to reset to factory defaults", "info");
+      if (user) {
+        showToast("Tap again to Sign Out from your Google Cloud Sync profile", "info");
+      } else {
+        showToast("Tap button again to reset to factory defaults", "info");
+      }
     }
   };
 
@@ -858,10 +940,21 @@ export default function App() {
   // Helper to delete a crop portfolio
   const deletePortfolio = async (id: string, isBigButton: boolean = false) => {
     if (pendingDeletePortfolioId === id) {
-      setCropPortfolios((prev) => prev.filter((p) => p.id !== id));
-      setSelectedCropId(null);
-      setPendingDeletePortfolioId(null);
-      showToast("Portfolio deleted successfully", "info");
+      if (user) {
+        try {
+          await deleteDoc(doc(db, "portfolios", id));
+          setSelectedCropId(null);
+          setPendingDeletePortfolioId(null);
+          showToast("Portfolio deleted successfully from cloud", "info");
+        } catch (err) {
+          handleFirestoreError(err, OperationType.DELETE, `portfolios/${id}`);
+        }
+      } else {
+        setCropPortfolios((prev) => prev.filter((p) => p.id !== id));
+        setSelectedCropId(null);
+        setPendingDeletePortfolioId(null);
+        showToast("Portfolio deleted successfully", "info");
+      }
     } else {
       setPendingDeletePortfolioId(id);
       showToast(isBigButton ? "Tap button once more to confirm permanent portfolio deletion" : "Tap again to confirm delete", "info");
@@ -871,19 +964,28 @@ export default function App() {
   // Helper to delete an individual scan history record
   const deleteScanRecord = async (portfolioId: string, scanId: string) => {
     if (pendingDeleteScanId === scanId) {
-      setCropPortfolios((prev) =>
-        prev.map((p) => {
-          if (p.id === portfolioId) {
-            return {
-              ...p,
-              scanHistory: (p.scanHistory || []).filter((h: any) => h.id !== scanId)
-            };
+      const targetCrop = cropPortfolios.find((p) => p.id === portfolioId);
+      if (targetCrop) {
+        const updatedCrop = {
+          ...targetCrop,
+          scanHistory: (targetCrop.scanHistory || []).filter((h: any) => h.id !== scanId)
+        };
+        if (user) {
+          try {
+            await setDoc(doc(db, "portfolios", portfolioId), updatedCrop);
+            setPendingDeleteScanId(null);
+            showToast("Diagnostic scan record deleted from cloud", "info");
+          } catch (err) {
+            handleFirestoreError(err, OperationType.WRITE, `portfolios/${portfolioId}`);
           }
-          return p;
-        })
-      );
-      setPendingDeleteScanId(null);
-      showToast("Diagnostic scan record deleted", "info");
+        } else {
+          setCropPortfolios((prev) =>
+            prev.map((p) => (p.id === portfolioId ? updatedCrop : p))
+          );
+          setPendingDeleteScanId(null);
+          showToast("Diagnostic scan record deleted", "info");
+        }
+      }
     } else {
       setPendingDeleteScanId(scanId);
       showToast("Tap again to delete scan history item", "info");
@@ -913,28 +1015,38 @@ export default function App() {
       notes: newLogNotes.trim() || "Observed physical parameters look normal and stable."
     };
 
-    setCropPortfolios((prev) =>
-      prev.map((p) => {
-        if (p.id === portfolioId) {
-          const currentLogs = p.growthLogs !== undefined ? p.growthLogs : getDefaultLogsForCrop(p.id);
-          return {
-            ...p,
-            growthStage: newLogStage, // Keep portfolio stage synchronized in card
-            growthLogs: [newLog, ...currentLogs]
-          };
-        }
-        return p;
-      })
-    );
+    const targetCrop = cropPortfolios.find((p) => p.id === portfolioId);
+    if (targetCrop) {
+      const currentLogs = targetCrop.growthLogs !== undefined ? targetCrop.growthLogs : getDefaultLogsForCrop(targetCrop.id);
+      const updatedCrop = {
+        ...targetCrop,
+        growthStage: newLogStage, // Keep portfolio stage synchronized in card
+        growthLogs: [newLog, ...currentLogs]
+      };
 
-    // Reset fields
-    setNewLogNotes("Observed physical development parameters look normal and stable.");
-    setIsAddingGrowthLog(false);
-    showToast("Growth log entry recorded successfully!", "success");
+      if (user) {
+        try {
+          await setDoc(doc(db, "portfolios", portfolioId), updatedCrop);
+          setNewLogNotes("Observed physical development parameters look normal and stable.");
+          setIsAddingGrowthLog(false);
+          showToast("Growth log entry recorded in cloud!", "success");
+        } catch (err) {
+          handleFirestoreError(err, OperationType.WRITE, `portfolios/${portfolioId}`);
+        }
+      } else {
+        setCropPortfolios((prev) =>
+          prev.map((p) => (p.id === portfolioId ? updatedCrop : p))
+        );
+        setNewLogNotes("Observed physical development parameters look normal and stable.");
+        setIsAddingGrowthLog(false);
+        showToast("Growth log entry recorded successfully!", "success");
+      }
+    }
   };
 
   // Helper to resolve logs properly preserving initial data
-  const getCropLogs = (crop: CropPortfolio) => {
+  const getCropLogs = (crop: CropPortfolio | undefined) => {
+    if (!crop) return [];
     if (crop.growthLogs !== undefined) {
       return crop.growthLogs;
     }
@@ -944,20 +1056,29 @@ export default function App() {
   // Helper to delete an individual growth log record
   const deleteGrowthLog = async (portfolioId: string, logId: string) => {
     if (pendingDeleteLogId === logId) {
-      setCropPortfolios((prev) =>
-        prev.map((p) => {
-          if (p.id === portfolioId) {
-            const currentLogs = p.growthLogs !== undefined ? p.growthLogs : getDefaultLogsForCrop(p.id);
-            return {
-              ...p,
-              growthLogs: currentLogs.filter((l) => l.id !== logId)
-            };
+      const targetCrop = cropPortfolios.find((p) => p.id === portfolioId);
+      if (targetCrop) {
+        const currentLogs = targetCrop.growthLogs !== undefined ? targetCrop.growthLogs : getDefaultLogsForCrop(targetCrop.id);
+        const updatedCrop = {
+          ...targetCrop,
+          growthLogs: currentLogs.filter((l) => l.id !== logId)
+        };
+        if (user) {
+          try {
+            await setDoc(doc(db, "portfolios", portfolioId), updatedCrop);
+            setPendingDeleteLogId(null);
+            showToast("Growth log entry removed from cloud database", "info");
+          } catch (err) {
+            handleFirestoreError(err, OperationType.WRITE, `portfolios/${portfolioId}`);
           }
-          return p;
-        })
-      );
-      setPendingDeleteLogId(null);
-      showToast("Growth log entry removed from records", "info");
+        } else {
+          setCropPortfolios((prev) =>
+            prev.map((p) => (p.id === portfolioId ? updatedCrop : p))
+          );
+          setPendingDeleteLogId(null);
+          showToast("Growth log entry removed from records", "info");
+        }
+      }
     } else {
       setPendingDeleteLogId(logId);
       showToast("Tap again to delete this growth log", "info");
@@ -1134,7 +1255,18 @@ export default function App() {
         ]
       };
 
-      setCropPortfolios((prev) => [newCrop, ...prev]);
+      if (user) {
+        newCrop.ownerId = user.uid;
+        try {
+          await setDoc(doc(db, "portfolios", newId), newCrop);
+          showToast("Diagnostic analysis synced to new Cloud Portfolio", "success");
+        } catch (err) {
+          handleFirestoreError(err, OperationType.WRITE, `portfolios/${newId}`);
+        }
+      } else {
+        setCropPortfolios((prev) => [newCrop, ...prev]);
+        showToast("Diagnostic analysis saved to local profile", "success");
+      }
       setSelectedCropId(newId);
     } else {
       // Append scan history record directly to selected existing portfolio
@@ -1187,9 +1319,19 @@ export default function App() {
           ]
         };
 
-        setCropPortfolios((prev) =>
-          prev.map((p) => (p.id === saveTargetPortfolioId ? updatedCrop : p))
-        );
+        if (user) {
+          try {
+            await setDoc(doc(db, "portfolios", saveTargetPortfolioId), updatedCrop);
+            showToast("Diagnostic medical scan appended to Cloud database", "success");
+          } catch (err) {
+            handleFirestoreError(err, OperationType.WRITE, `portfolios/${saveTargetPortfolioId}`);
+          }
+        } else {
+          setCropPortfolios((prev) =>
+            prev.map((p) => (p.id === saveTargetPortfolioId ? updatedCrop : p))
+          );
+          showToast("Diagnostic medical scan saved to your guest profile", "success");
+        }
       }
       setSelectedCropId(saveTargetPortfolioId);
     }
@@ -1423,7 +1565,7 @@ export default function App() {
 
                   <div className="px-5 mt-5">
                     {/* Quick Actions Bento Grid */}
-                    <section className="grid grid-cols-4 gap-2 mb-6" id="quick-actions-toolbar">
+                    <section className="grid grid-cols-2 gap-2 mb-6" id="quick-actions-toolbar">
                       {/* Start Scan */}
                       <button 
                         onClick={() => {
@@ -1449,217 +1591,9 @@ export default function App() {
                         <span className="material-symbols-outlined text-2xl text-secondary">history</span>
                         <span className="text-[10px] font-bold tracking-tight text-on-surface-variant">{t("viewHistory")}</span>
                       </button>
-
-                      {/* Growth Logs */}
-                      <button 
-                        onClick={() => setPortfolioViewMode("logs")}
-                        className="flex flex-col items-center justify-center gap-1.5 p-3 bg-surface-container-lowest border border-outline-variant text-on-surface rounded-xl notepad-shadow active:scale-95 transition-transform hover:bg-surface-container-low"
-                        id="action-growth-logs"
-                      >
-                        <span className="material-symbols-outlined text-2xl text-secondary">insert_chart</span>
-                        <span className="text-[10px] font-bold tracking-tight text-on-surface-variant">{t("growthLogs")}</span>
-                      </button>
-
-                      {/* Pest Guide */}
-                      <button 
-                        onClick={() => setPortfolioViewMode("pest_guide")}
-                        className="flex flex-col items-center justify-center gap-1.5 p-3 bg-surface-container-lowest border border-outline-variant text-on-surface rounded-xl notepad-shadow active:scale-95 transition-transform hover:bg-surface-container-low"
-                        id="action-pest-guide"
-                      >
-                        <span className="material-symbols-outlined text-2xl text-secondary">menu_book</span>
-                        <span className="text-[10px] font-bold tracking-tight text-on-surface-variant">{t("pestGuide")}</span>
-                      </button>
                     </section>
 
 
-
-                    {/* Growth Logs Section */}
-                    {portfolioViewMode === "logs" && (
-                      <section className="animate-fadeIn mt-1 text-left" id="portfolio-growth-logs-section">
-                        <div className="flex justify-between items-center mb-4">
-                          <h3 className="text-sm font-bold text-primary font-sans uppercase tracking-wider flex items-center gap-1.5">
-                            <span className="material-symbols-outlined text-lg text-secondary">insert_chart</span>
-                            {t("growthLogsHeading")}
-                          </h3>
-                          <button
-                            onClick={() => setIsAddingGrowthLog(!isAddingGrowthLog)}
-                            className="bg-primary/10 text-primary text-[11px] font-extrabold px-3 py-1.5 rounded-xl flex items-center gap-1 transition-transform active:scale-95 hover:bg-primary/15 border border-primary/15"
-                          >
-                            <span className="material-symbols-outlined text-xs">{isAddingGrowthLog ? "close" : "add"}</span>
-                            {isAddingGrowthLog ? t("cancel") : (appLanguage === "Español (ES)" ? "Agregar Bitácora" : appLanguage === "Français (FR)" ? "Ajouter Journal" : "Add Log")}
-                          </button>
-                        </div>
-
-                        {/* Add Growth Log expandable panel */}
-                        {isAddingGrowthLog && (
-                          <div className="bg-surface-container-low p-4 rounded-2xl border border-outline-variant mb-4 animate-scaleUp">
-                            <h4 className="text-xs font-extrabold text-primary uppercase tracking-wider mb-3">
-                              {appLanguage === "Español (ES)" ? "Registrar bitácora de desarrollo" : appLanguage === "Français (FR)" ? "Enregistrer un nouveau journal" : "Record Development Log"}
-                            </h4>
-                            
-                            <div className="grid grid-cols-2 gap-3 mb-3">
-                              <div className="flex flex-col gap-1">
-                                <label className="text-[10px] font-black text-on-surface-variant uppercase tracking-wider">{t("growthStage")}</label>
-                                <select 
-                                  value={newLogStage}
-                                  onChange={(e) => setNewLogStage(e.target.value)}
-                                  className="w-full bg-surface-container h-9 px-2 border border-outline-variant rounded-xl text-xs outline-none font-semibold cursor-pointer text-on-surface"
-                                >
-                                  <option value="Seedling">{translateGrowthStage("Seedling")}</option>
-                                  <option value="Vegetative">{translateGrowthStage("Vegetative")}</option>
-                                  <option value="Tasseling">{translateGrowthStage("Tasseling")}</option>
-                                  <option value="Grain Fill">{translateGrowthStage("Grain Fill")}</option>
-                                  <option value="Maturity">{translateGrowthStage("Maturity")}</option>
-                                </select>
-                              </div>
-                              
-                              <div className="flex flex-col gap-1">
-                                <label className="text-[10px] font-black text-on-surface-variant uppercase tracking-wider">
-                                  {appLanguage === "Español (ES)" ? "Altura (cm)" : appLanguage === "Français (FR)" ? "Hauteur (cm)" : "Height (cm)"}
-                                </label>
-                                <input 
-                                  type="number"
-                                  value={newLogHeight}
-                                  onChange={(e) => setNewLogHeight(Number(e.target.value))}
-                                  className="w-full bg-surface-container h-9 px-2 border border-outline-variant rounded-xl text-xs outline-none font-bold text-on-surface"
-                                  min="1"
-                                  max="1000"
-                                />
-                              </div>
-                            </div>
-
-                            <div className="flex flex-col gap-1 mb-3">
-                              <label className="text-[10px] font-black text-on-surface-variant uppercase tracking-wider">
-                                {appLanguage === "Español (ES)" ? "Observaciones físicas / Notas" : appLanguage === "Français (FR)" ? "Observations physiques / Notes" : "Physical Observations / Notes"}
-                              </label>
-                              <textarea 
-                                value={newLogNotes}
-                                onChange={(e) => setNewLogNotes(e.target.value)}
-                                rows={2}
-                                className="w-full bg-surface-container p-2 border border-outline-variant rounded-xl text-xs outline-none font-medium leading-normal text-on-surface focus:ring-1 focus:ring-primary/20"
-                                placeholder={
-                                  appLanguage === "Español (ES)" ? "Describa el follaje, colores, distancia entre hojas o anomalías..." :
-                                  appLanguage === "Français (FR)" ? "Décrire l'état du feuillage, les couleurs ou les anomalies de croissance..." :
-                                  "Describe foliage state, colors, leaf spacing or any developmental anomalies..."
-                                }
-                              />
-                            </div>
-
-                            <button 
-                              onClick={() => addGrowthLog(selectedCrop.id)}
-                              className="w-full h-9 bg-primary text-on-primary rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 hover:bg-emerald-700 transition-all active:scale-95 shadow-sm"
-                            >
-                              <span className="material-symbols-outlined text-xs">done_all</span>
-                              {appLanguage === "Español (ES)" ? "Guardar Registro" : appLanguage === "Français (FR)" ? "Ajouter l'Entrée" : "Record Log Entry"}
-                            </button>
-                          </div>
-                        )}
-
-                        {/* Displaying logs */}
-                        <div className="flex flex-col gap-2.5">
-                          {getCropLogs(selectedCrop).map((log, lIdx) => (
-                            <div 
-                              key={log.id || lIdx}
-                              className="bg-surface-container-lowest border border-outline-variant rounded-xl p-3 shadow-sm flex flex-col gap-1 relative overflow-hidden text-left"
-                            >
-                              <div className="absolute top-0 left-0 w-1 h-full bg-secondary"></div>
-                              
-                              <div className="flex justify-between items-start pl-2">
-                                <div>
-                                  <span className="text-[10px] bg-secondary/10 text-secondary border border-secondary/20 px-2 py-0.5 rounded-full font-bold uppercase tracking-wide">
-                                    {translateGrowthStage(log.stage)}
-                                  </span>
-                                  <span className="text-[10px] text-on-surface-variant font-extrabold font-mono ml-2">{log.date}</span>
-                                </div>
-                                <div className="flex items-center gap-2">
-                                  <span className="text-xs font-black text-primary font-mono">{log.height} cm</span>
-                                  <button
-                                    onClick={() => deleteGrowthLog(selectedCrop.id, log.id)}
-                                    className={`w-6 h-6 rounded flex items-center justify-center transition-all border ${
-                                      pendingDeleteLogId === log.id
-                                        ? "bg-amber-500 border-amber-400 text-white animate-pulse"
-                                        : "bg-red-50 hover:bg-red-100 text-red-500 border-transparent hover:border-red-100"
-                                    }`}
-                                    title="Delete growth record"
-                                    id={`btn-del-growth-${log.id || lIdx}`}
-                                  >
-                                    <span className="material-symbols-outlined text-[13px] font-black">
-                                      {pendingDeleteLogId === log.id ? "done" : "close"}
-                                    </span>
-                                  </button>
-                                </div>
-                              </div>
-
-                              <p className="text-xs text-on-surface-variant leading-relaxed mt-1.5 text-left pl-2 font-medium bg-zinc-50/40 p-2 rounded-xl">
-                                {log.notes}
-                              </p>
-                            </div>
-                          ))}
-                        </div>
-                      </section>
-                    )}
-
-                    {/* Pest Guide Section */}
-                    {portfolioViewMode === "pest_guide" && (
-                      <section className="animate-fadeIn mt-1 text-left" id="portfolio-pest-guide-section">
-                        <div className="flex justify-between items-center mb-4">
-                          <h3 className="text-sm font-bold text-primary font-sans uppercase tracking-wider flex items-center gap-1.5">
-                            <span className="material-symbols-outlined text-lg text-secondary">menu_book</span>
-                            {t("pestGuideHeading")}
-                          </h3>
-                          <span className="text-[10px] bg-emerald-50 text-emerald-800 border border-emerald-200 font-black px-2.5 py-0.5 rounded-full uppercase tracking-wider">
-                            {appLanguage === "Español (ES)" ? "Fichas de Agronomía" : appLanguage === "Français (FR)" ? "Fiches d'Agronomie" : "Agronomy Sheets"}
-                          </span>
-                        </div>
-                        
-                        <p className="text-xs text-on-surface-variant mt-0.5 mb-4 leading-relaxed text-left">
-                          {appLanguage === "Español (ES)" ? (
-                            <>Referencias de patología compiladas para <span className="font-bold text-primary">{selectedCrop.name} ({selectedCrop.scienceName || "Specimen"})</span> basadas en planos de agronomía localizados.</>
-                          ) : appLanguage === "Français (FR)" ? (
-                            <>Références pathologiques compilées pour <span className="font-bold text-primary">{selectedCrop.name} ({selectedCrop.scienceName || "Specimen"})</span> selon les fiches d'agronomie locales.</>
-                          ) : (
-                            <>Pathology references compiled for <span className="font-bold text-primary">{selectedCrop.name} ({selectedCrop.scienceName || "Specimen"})</span> based on localized geographical agronomy blueprints.</>
-                          )}
-                        </p>
-
-                        <div className="flex flex-col gap-3">
-                          {getPestGuideForCrop(selectedCrop.name).map((guide, gIdx) => (
-                            <div 
-                              key={gIdx}
-                              className="bg-white border border-outline-variant/80 rounded-2xl p-4 shadow-sm text-left flex flex-col gap-2.5 hover:border-secondary transition-all"
-                            >
-                              <div className="flex items-center gap-2">
-                                <span className="p-1 text-red-600 bg-red-50 rounded-lg flex items-center justify-center">
-                                  <span className="material-symbols-outlined text-base">pest_control_rodent</span>
-                                </span>
-                                <h4 className="font-extrabold text-primary text-xs leading-snug">{guide.pest}</h4>
-                              </div>
-
-                              <div className="text-xs flex flex-col gap-1.5 mt-0.5 border-t border-dashed border-zinc-100 pt-2 bg-zinc-50/30 p-2 rounded-xl">
-                                <div>
-                                  <span className="text-[10px] font-black text-zinc-400 uppercase tracking-wide block">
-                                    {appLanguage === "Español (ES)" ? "Síntomas" : appLanguage === "Français (FR)" ? "Symptômes" : "Symptoms"}
-                                  </span>
-                                  <p className="text-on-surface font-semibold text-xs mt-0.5 leading-normal">{guide.symptoms}</p>
-                                </div>
-                                <div className="mt-1">
-                                  <span className="text-[10px] font-black text-emerald-600 uppercase tracking-wide block">
-                                    {appLanguage === "Español (ES)" ? "Remedio y Tratamiento" : appLanguage === "Français (FR)" ? "Remède & Traitement" : "Remedy & Treatment"}
-                                  </span>
-                                  <p className="text-emerald-800 font-bold text-xs mt-0.5 leading-normal">{guide.treatment}</p>
-                                </div>
-                                <div className="mt-1">
-                                  <span className="text-[10px] font-black text-zinc-400 uppercase tracking-wide block">
-                                    {appLanguage === "Español (ES)" ? "Prevención Preventiva" : appLanguage === "Français (FR)" ? "Prévention Préventive" : "Pre-emptive Prevention"}
-                                  </span>
-                                  <p className="text-on-surface-variant font-medium text-xs mt-0.5 leading-normal">{guide.prevention}</p>
-                                </div>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </section>
-                    )}
 
                     {/* Portfolio Internal Diagnostic Scan History */}
                     {portfolioViewMode === "history" && (
@@ -1964,6 +1898,26 @@ export default function App() {
               </div>
             ) : (
               <div className="px-5 mt-2 animate-fadeIn" id="screen-scan-result">
+                {/* Header with back button */}
+                <div className="w-full flex items-center gap-4 py-4 -mx-5 px-5 mb-4 border-b border-outline-variant/30 bg-zinc-950/20">
+                  <button 
+                    onClick={() => {
+                      setScanResult(null);
+                      setActiveScanningPortfolioId(null);
+                      setSaveTargetPortfolioId("NEW");
+                    }}
+                    className="text-zinc-400 hover:text-white transition-all p-1.5 rounded-full hover:bg-zinc-800/50 flex items-center justify-center active:scale-95 cursor-pointer"
+                    id="btn-scan-result-back"
+                  >
+                    <span className="material-symbols-outlined text-lg">arrow_back</span>
+                  </button>
+                  <div className="flex flex-col text-left">
+                    <h2 className="text-base font-extrabold text-zinc-100 font-sans tracking-tight leading-none">
+                      {appLanguage === "Español (ES)" ? "Resultado del Diagnóstico" : appLanguage === "Français (FR)" ? "Résultat du Diagnostic" : "Diagnostic Result"}
+                    </h2>
+                  </div>
+                </div>
+
                 {/* Captured Image Section */}
                 <section className="w-full mb-4">
                   <div className="relative w-full aspect-[4/3] rounded-3xl overflow-hidden border border-zinc-800 bg-zinc-950 shadow-2xl">
@@ -2380,6 +2334,22 @@ export default function App() {
         {activeTab === "settings" && (
           <div className="px-5 animate-fadeIn pb-12" id="screen-settings">
             
+            {/* Settings Header with Back Button */}
+            <div className="w-full flex items-center gap-4 py-4 -mx-5 px-5 mb-5 border-b border-outline-variant/30 bg-zinc-950/20">
+              <button 
+                onClick={() => setActiveTab("crops")}
+                className="text-zinc-400 hover:text-white transition-all p-1.5 rounded-full hover:bg-zinc-800/50 flex items-center justify-center active:scale-95 cursor-pointer"
+                id="btn-settings-back"
+              >
+                <span className="material-symbols-outlined text-lg">arrow_back</span>
+              </button>
+              <div className="flex flex-col text-left">
+                <h2 className="text-base font-extrabold text-zinc-100 font-sans tracking-tight leading-none">
+                  {appLanguage === "Español (ES)" ? "Ajustes" : appLanguage === "Français (FR)" ? "Paramètres" : "Settings"}
+                </h2>
+              </div>
+            </div>
+
             {/* Profile Section */}
             <section className="mb-6 mt-1">
               <div className="bg-surface-container-lowest p-5 rounded-2xl border border-outline-variant">
@@ -2401,11 +2371,21 @@ export default function App() {
                         )}
                       </div>
                       <p className="font-sans text-xs text-on-surface-variant truncate font-medium">{currentUserEmail}</p>
-                      {user && (
+                      {user ? (
                         <div className="flex items-center gap-1 text-[10px] text-emerald-600 font-bold bg-emerald-50 dark:bg-emerald-950/30 px-2 py-0.5 rounded-full w-fit mt-1 border border-emerald-100 dark:border-emerald-900/30">
                           <span className="material-symbols-outlined text-[10px]">cloud_done</span>
                           Cloud Sync Active
                         </div>
+                      ) : (
+                        <button
+                          onClick={handleGoogleSignIn}
+                          className="flex items-center gap-1.5 bg-primary hover:bg-opacity-90 text-white font-semibold text-[10px] px-3 py-1 rounded-full w-fit mt-1.5 active:scale-95 transition-all shadow-sm cursor-pointer"
+                        >
+                          <svg className="w-2.5 h-2.5 fill-current" viewBox="0 0 24 24">
+                            <path d="M12.24 10.285V14.4h6.887c-.648 2.41-2.519 4.114-5.136 4.114-3.51 0-6.36-2.85-6.36-6.36s2.85-6.36 6.36-6.36c1.623 0 3.102.613 4.232 1.624l3.14-3.14a10.875 10.875 0 00-7.372-2.848C5.02 1.44 0 6.46 0 12.24s5.02 10.8 10.8 10.8c5.448 0 10.08-3.903 10.08-10.08 0-.613-.06-1.192-.18-1.722H12.24z"/>
+                          </svg>
+                          Connect Google Cloud Sync
+                        </button>
                       )}
                     </div>
                   ) : (
@@ -2572,46 +2552,6 @@ export default function App() {
               </div>
             </section>
 
-            {/* Preferred AI Model Selection Section */}
-            <section className="mb-6">
-              <h3 className="text-xs font-bold text-tertiary mb-2 px-1 uppercase tracking-wider">{t("activeModel")}</h3>
-              <div className="bg-surface-container-lowest rounded-2xl border border-outline-variant p-4 shadow-sm">
-                <div className="flex flex-col gap-3">
-                  <div className="flex items-center gap-3">
-                    <span className="material-symbols-outlined text-secondary font-headline-sm">neurology</span>
-                    <div className="flex flex-col min-w-0">
-                      <span className="text-xs font-bold text-on-surface leading-tight">Diagnostic AI Engine</span>
-                      <span className="text-[10px] text-on-surface-variant font-medium mt-0.5">Choose which Gemini model drives diagnostics</span>
-                    </div>
-                  </div>
-                  
-                  <div className="relative mt-1">
-                    <select
-                      value={preferredModel}
-                      onChange={(e) => {
-                        setPreferredModel(e.target.value);
-                        showToast(`Diagnostic model set to: ${e.target.value}`, "success");
-                      }}
-                      className="w-full bg-surface-container text-xs font-bold text-on-surface border border-outline-variant rounded-xl px-3 py-2.5 outline-none focus:border-primary focus:ring-1 focus:ring-primary h-11 cursor-pointer transition-all appearance-none"
-                    >
-                      <option value="gemini-3.5-flash">Gemini 3.5 Flash (Default - Balanced & Fast)</option>
-                      <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro (Heavy Reasoning & Deep Pathology)</option>
-                      <option value="gemini-flash-latest">Gemini Flash Latest (Sub-second low latency)</option>
-                      <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash-Lite (Minimum Resource cost)</option>
-                    </select>
-                    <div className="absolute inset-y-0 right-3 flex items-center pointer-events-none text-on-surface-variant">
-                      <span className="material-symbols-outlined text-sm">unfold_more</span>
-                    </div>
-                  </div>
-
-                  <div className="bg-surface-container-low p-2.5 rounded-xl border border-outline-variant/30 text-[10px] text-on-surface-variant flex items-center gap-2 mt-1">
-                    <span className="material-symbols-outlined text-xs text-primary leading-none">info</span>
-                    <span>Supports real-time computer vision payload decoding & smart treatments.</span>
-                  </div>
-                </div>
-              </div>
-            </section>
-
             {/* Log Out button and storage reset */}
             <section className="mb-6">
               <button 
@@ -2649,12 +2589,19 @@ export default function App() {
             {/* Drawer Header */}
             <div className="p-4 bg-surface border-b border-outline-variant flex justify-between items-center shrink-0">
               <div className="flex items-center gap-3">
-                <div className="w-9 h-9 rounded-full bg-secondary-container flex items-center justify-center border border-secondary/30 shrink-0">
+                <button 
+                  onClick={() => setIsChatOpen(false)}
+                  className="w-8 h-8 rounded-full bg-surface-container flex items-center justify-center text-outline hover:text-black transition-all mr-1"
+                  title="Go back"
+                >
+                  <span className="material-symbols-outlined text-base">arrow_back</span>
+                </button>
+                <div className="w-9 h-9 rounded-full bg-secondary-container flex items-center justify-center border border-secondary/30 shrink-0 font-bold">
                   <span className="material-symbols-outlined text-secondary text-base">support_agent</span>
                 </div>
                 <div>
                   <h4 className="text-xs font-bold text-primary">Consul. Dr. Julian Vance</h4>
-                  <p className="text-[10px] text-on-surface-variant font-medium">Calibrated Pathology Advisor</p>
+                  <p className="text-[10px] text-on-surface-variant font-medium font-sans">Calibrated Pathology Advisor</p>
                 </div>
               </div>
               
@@ -2720,12 +2667,20 @@ export default function App() {
             {/* Drawer Header */}
             <div className="p-4 bg-surface border-b border-outline-variant flex justify-between items-center shrink-0">
               <div className="flex items-center gap-3">
+                <button 
+                  type="button"
+                  onClick={() => setIsCreatePortfolioOpen(false)}
+                  className="w-8 h-8 rounded-full bg-surface-container flex items-center justify-center text-outline hover:text-black transition-all mr-1"
+                  title="Go back"
+                >
+                  <span className="material-symbols-outlined text-base">arrow_back</span>
+                </button>
                 <div className="w-9 h-9 rounded-full bg-emerald-100 dark:bg-emerald-950/40 flex items-center justify-center border border-emerald-200 dark:border-emerald-800/30 shrink-0">
                   <span className="material-symbols-outlined text-emerald-600 dark:text-emerald-400 text-base">potted_plant</span>
                 </div>
                 <div>
                   <h4 className="text-sm font-black text-primary">New Crop Portfolio</h4>
-                  <p className="text-[10px] text-on-surface-variant font-medium">Add a customizable specimen to your workspace</p>
+                  <p className="text-[10px] text-on-surface-variant font-medium font-sans">Add a customizable specimen to your workspace</p>
                 </div>
               </div>
               
@@ -2766,54 +2721,6 @@ export default function App() {
                   value={newPortfolioScienceName}
                   onChange={(e) => setNewPortfolioScienceName(e.target.value)}
                   id="input-portfolio-science"
-                />
-              </div>
-
-              {/* Growth Stage and Est Yield Row */}
-              <div className="grid grid-cols-2 gap-3">
-                <div className="flex flex-col gap-1.5">
-                  <label className="text-[10px] font-black uppercase tracking-wider text-on-surface-variant font-bold">Growth Stage</label>
-                  <select 
-                    className="w-full h-11 px-2 bg-surface-container border border-outline-variant focus:border-emerald-500 rounded-xl text-xs outline-none font-semibold transition-all text-on-surface animate-scaleUp"
-                    value={newPortfolioStage}
-                    onChange={(e) => setNewPortfolioStage(e.target.value)}
-                    id="select-portfolio-stage"
-                  >
-                    <option value="Seedling" className="bg-surface text-on-surface">Seedling</option>
-                    <option value="Vegetative" className="bg-surface text-on-surface">Vegetative</option>
-                    <option value="Tasseling" className="bg-surface text-on-surface">Tasseling</option>
-                    <option value="Grain Fill" className="bg-surface text-on-surface">Grain Fill</option>
-                    <option value="Maturity" className="bg-surface text-on-surface">Maturity</option>
-                  </select>
-                </div>
-
-                <div className="flex flex-col gap-1.5">
-                  <label className="text-[10px] font-black uppercase tracking-wider text-on-surface-variant font-bold">Estimated Yield</label>
-                  <input 
-                    type="text"
-                    placeholder="e.g., 2.5t"
-                    className="w-full h-11 px-3 bg-surface-container border border-outline-variant focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 rounded-xl text-xs outline-none font-semibold transition-all text-on-surface"
-                    value={newPortfolioEstYield}
-                    onChange={(e) => setNewPortfolioEstYield(e.target.value)}
-                    id="input-portfolio-yield"
-                  />
-                </div>
-              </div>
-
-              {/* Slider for soil moisture */}
-              <div className="flex flex-col gap-1.5 py-1">
-                <div className="flex justify-between items-center">
-                  <label className="text-[10px] font-black uppercase tracking-wider text-on-surface-variant font-bold">Target Soil Moisture</label>
-                  <span className="text-xs font-bold text-emerald-600">{newPortfolioMoisture}%</span>
-                </div>
-                <input 
-                  type="range"
-                  min="10"
-                  max="90"
-                  className="w-full accent-emerald-500 cursor-pointer h-2 bg-surface-container rounded-lg appearance-none"
-                  value={newPortfolioMoisture}
-                  onChange={(e) => setNewPortfolioMoisture(Number(e.target.value))}
-                  id="input-portfolio-moisture"
                 />
               </div>
 
@@ -2918,12 +2825,19 @@ export default function App() {
             {/* Drawer Header */}
             <div className="p-4 bg-surface border-b border-outline-variant flex justify-between items-center shrink-0">
               <div className="flex items-center gap-3">
+                <button 
+                  onClick={() => setIsSupportChatOpen(false)}
+                  className="w-8 h-8 rounded-full bg-surface-container flex items-center justify-center text-outline hover:text-black transition-all mr-1"
+                  title="Go back"
+                >
+                  <span className="material-symbols-outlined text-base">arrow_back</span>
+                </button>
                 <div className="w-9 h-9 rounded-full bg-primary-container flex items-center justify-center border border-primary/30 shrink-0">
                   <span className="material-symbols-outlined text-primary text-base">support</span>
                 </div>
                 <div>
                   <h4 className="text-xs font-bold text-primary">AgriScan AI Support Bot</h4>
-                  <p className="text-[10px] text-on-surface-variant font-medium">Instant Assistant & Setup Helper</p>
+                  <p className="text-[10px] text-on-surface-variant font-medium font-sans">Instant Assistant & Setup Helper</p>
                 </div>
               </div>
               
