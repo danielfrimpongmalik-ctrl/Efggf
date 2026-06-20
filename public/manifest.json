@@ -1,0 +1,25 @@
+{
+  "name": "AgriScan AI - Crop Diagnostics & Tracker",
+  "short_name": "AgriScan",
+  "description": "High-fidelity crop pathology diagnostic gateway and agronomic portfolio tracker powered by Gemini AI.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#173124",
+  "theme_color": "#173124",
+  "categories": ["utilities", "productivity", "education"],
+  "icons": [
+    {
+      "src": "https://lh3.googleusercontent.com/aida-public/AB6AXuCJPM5FUbYJekt9TD8bqwPtsgDl_47MJIPWtWApw_1qB3pq9jeQ1w781H-deTvEheM4wV_wtKx3Rn6KZc8qxc3wlFEvW7ifTUrZyQ21kLNSJQsuXXt7YOOj4e1grbOkl3kwXdOXfVJYSoWX9W4L4CFaTJDDjB0eCNzjmN50TjnQsIuHKI3Yh8IGIN4LR9cKaJ8KebLuvm-A5ruAsRwtAOPgtyHaub62hio7o-zz6RlMqXPx-tg47s4CKs4negX65IJ-xe0ZWoA1F-Ze",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "https://lh3.googleusercontent.com/aida-public/AB6AXuCJPM5FUbYJekt9TD8bqwPtsgDl_47MJIPWtWApw_1qB3pq9jeQ1w781H-deTvEheM4wV_wtKx3Rn6KZc8qxc3wlFEvW7ifTUrZyQ21kLNSJQsuXXt7YOOj4e1grbOkl3kwXdOXfVJYSoWX9W4L4CFaTJDDjB0eCNzjmN50TjnQsIuHKI3Yh8IGIN4LR9cKaJ8KebLuvm-A5ruAsRwtAOPgtyHaub62hio7o-zz6RlMqXPx-tg47s4CKs4negX65IJ-xe0ZWoA1F-Ze",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

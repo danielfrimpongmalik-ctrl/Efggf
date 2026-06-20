@@ -5,12 +5,22 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <title>AgriScan AI - Crop Diagnostics & Portfolio Tracker</title>
     <!-- Store Wrapper & PWA Integration Requirements -->
+    <link rel="manifest" href="/manifest.json" />
     <meta name="theme-color" content="#173124" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="AgriScan" />
     <link rel="apple-touch-icon" href="https://lh3.googleusercontent.com/aida-public/AB6AXuCJPM5FUbYJekt9TD8bqwPtsgDl_47MJIPWtWApw_1qB3pq9jeQ1w781H-deTvEheM4wV_wtKx3Rn6KZc8qxc3wlFEvW7ifTUrZyQ21kLNSJQsuXXt7YOOj4e1grbOkl3kwXdOXfVJYSoWX9W4L4CFaTJDDjB0eCNzjmN50TjnQsIuHKI3Yh8IGIN4LR9cKaJ8KebLuvm-A5ruAsRwtAOPgtyHaub62hio7o-zz6RlMqXPx-tg47s4CKs4negX65IJ-xe0ZWoA1F-Ze" />
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('/sw.js')
+            .then(reg => console.log('Service Worker registered successfully!', reg.scope))
+            .catch(err => console.log('Service Worker registration failed:', err));
+        });
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>
