@@ -1343,11 +1343,112 @@ export default function App() {
   };
 
 
+  const renderSaveAndActions = () => {
+    if (!scanResult) return null;
+    return (
+      <div className="w-full flex flex-col gap-4">
+        {/* Destination Selector / Lock Notice */}
+        {!activeScanningPortfolioId ? (
+          <div className="bg-zinc-900 border border-zinc-800 p-3.5 rounded-2xl text-xs flex flex-col gap-1.5 shadow-md text-left">
+            <label className="text-[10px] font-extrabold text-zinc-400 block uppercase tracking-wider">
+              {appLanguage === "Español (ES)" ? "Guardar Análisis de Diagnóstico En:" : appLanguage === "Français (FR)" ? "Enregistrer l'Analyse Dans:" : "Save Diagnostic Scan To:"}
+            </label>
+            <select
+              value={saveTargetPortfolioId}
+              onChange={(e) => setSaveTargetPortfolioId(e.target.value)}
+              className="w-full h-11 px-3 bg-zinc-800 border border-zinc-700 rounded-xl text-white font-bold outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-all cursor-pointer text-xs"
+              id="select-save-destination"
+            >
+              <option value="NEW">✨ {appLanguage === "Español (ES)" ? "Establecer como nuevo portafolio" : appLanguage === "Français (FR)" ? "Créer un nouveau portfolio" : "Establish as a New Portfolio"}</option>
+              {cropPortfolios.map((portfolio) => (
+                <option key={portfolio.id} value={portfolio.id}>
+                  📂 {portfolio.name} ({appLanguage === "Español (ES)" ? "Historial" : appLanguage === "Français (FR)" ? "Historique" : "History Log"})
+                </option>
+              ))}
+            </select>
+          </div>
+        ) : (
+          <div className="bg-emerald-950/40 border border-emerald-500/20 p-3.5 rounded-2xl text-xs flex items-center justify-between shadow-md text-left">
+            <div className="flex items-center gap-2.5">
+              <span className="material-symbols-outlined text-emerald-400 text-lg">folder_open</span>
+              <div className="text-left">
+                <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider block leading-none">
+                  {appLanguage === "Español (ES)" ? "Portafolio de Destino Bloqueado" : appLanguage === "Français (FR)" ? "Portfolio Cible Verrouillé" : "Target Portfolio Locked"}
+                </span>
+                <p className="text-white font-extrabold text-xs mt-1.5">
+                  {cropPortfolios.find(p => p.id === activeScanningPortfolioId)?.name || "Current Portfolio"}
+                </p>
+              </div>
+            </div>
+            <span className="text-[9px] bg-emerald-900/50 text-emerald-400 px-2 py-0.5 rounded font-black border border-emerald-500/20 uppercase tracking-widest shrink-0">
+              {appLanguage === "Español (ES)" ? "Portafolio Enfocado" : appLanguage === "Français (FR)" ? "Portfolio Ciblé" : "Portfolio Focused"}
+            </span>
+          </div>
+        )}
+
+        {/* Action Buttons */}
+        <div className="flex flex-col gap-2.5">
+          <button 
+            onClick={saveToPortfolio}
+            className="w-full h-11 bg-primary text-on-primary rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 hover:bg-primary-container transition-all active:scale-[0.98] shadow-sm cursor-pointer"
+            id="btn-save-diagnostics"
+          >
+            <span className="material-symbols-outlined text-base">
+              {activeScanningPortfolioId || saveTargetPortfolioId !== "NEW" ? "history" : "folder_special"}
+            </span>
+            {activeScanningPortfolioId 
+              ? (appLanguage === "Español (ES)" 
+                  ? `Guardar en Historial de ${cropPortfolios.find(p => p.id === activeScanningPortfolioId)?.name || ""}` 
+                  : appLanguage === "Français (FR)" 
+                    ? `Sauvegarder dans l'Historique de ${cropPortfolios.find(p => p.id === activeScanningPortfolioId)?.name || ""}` 
+                    : `Save to ${cropPortfolios.find(p => p.id === activeScanningPortfolioId)?.name || ""} History`
+                )
+              : (saveTargetPortfolioId === "NEW" 
+                  ? (appLanguage === "Español (ES)" ? "Guardar como Nuevo Portafolio" : appLanguage === "Français (FR)" ? "Créer Nouveau Portfolio" : "Save as New Portfolio")
+                  : (appLanguage === "Español (ES)" 
+                      ? `Actualizar Historial de ${cropPortfolios.find(p => p.id === saveTargetPortfolioId)?.name || ""}` 
+                      : appLanguage === "Français (FR)" 
+                        ? `Mettre à jour l'Historique de ${cropPortfolios.find(p => p.id === saveTargetPortfolioId)?.name || ""}` 
+                        : `Update ${cropPortfolios.find(p => p.id === saveTargetPortfolioId)?.name || ""} History`
+                    )
+                )
+            }
+          </button>
+
+          <div className="grid grid-cols-2 gap-2">
+            <button 
+              onClick={() => {
+                setScanResult(null);
+                setActiveScanningPortfolioId(null);
+                setSaveTargetPortfolioId("NEW");
+                showToast("Scan diagnosis aborted & discarded", "info");
+                setActiveTab("crops");
+              }}
+              className="h-11 border border-red-900/60 text-red-400 bg-red-950/20 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 hover:bg-red-950/40 transition-all active:scale-95 shadow-sm cursor-pointer"
+              id="btn-abort-diagnostics"
+            >
+              <span className="material-symbols-outlined text-base">cancel</span>
+              {appLanguage === "Español (ES)" ? "Abortar Diagnóstico" : appLanguage === "Français (FR)" ? "Abandonner l'Analyse" : "Abort Diagnosis"}
+            </button>
+
+            <button 
+              onClick={() => openExpertChat(scanResult?.pestOrDisease || "Diseased Plant")}
+              className="h-11 border border-zinc-800 text-zinc-300 bg-zinc-900 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 hover:bg-zinc-800 transition-all active:scale-95 shadow-sm cursor-pointer"
+            >
+              <span className="material-symbols-outlined text-base">chat</span>
+              {appLanguage === "Español (ES)" ? "Chat Agronómico" : appLanguage === "Français (FR)" ? "Chat Agronome" : "Agronomy Chat"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
 
   return (
     <div 
       style={themes[appTheme] || {}} 
-      className="bg-background text-on-background min-h-screen flex flex-col font-sans max-w-md mx-auto relative border-x border-outline-variant shadow-lg"
+      className="bg-background text-on-background min-h-screen flex flex-col font-sans w-full max-w-none md:max-w-3xl lg:max-w-5xl xl:max-w-7xl mx-auto relative md:border-x border-outline-variant md:shadow-xl"
     >
       
       {/* TopAppBar */}
@@ -1432,7 +1533,7 @@ export default function App() {
                     <p className="text-sm font-medium text-on-surface-variant">{t("noMatching")}</p>
                   </div>
                 ) : (
-                  <div className="grid grid-cols-2 gap-3" id="crop-bento-grid">
+                  <div className="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4" id="crop-bento-grid">
                     {filteredPortfolios.map((crop) => {
                       // Map status to styling
                       let badgeBg = "bg-secondary-container text-on-secondary-container";
@@ -1512,7 +1613,7 @@ export default function App() {
                   
                   {/* Portfolio Headers depending on current sub-page view mode */}
                   {portfolioViewMode === "index" ? (
-                    <div className="relative w-full h-60 overflow-hidden" id="details-hero">
+                    <div className="relative w-full h-60 sm:h-72 md:h-80 lg:h-[380px] overflow-hidden md:rounded-b-2xl" id="details-hero">
                       <img 
                         className="w-full h-full object-cover" 
                         alt={selectedCrop.name}
@@ -1808,7 +1909,7 @@ export default function App() {
                 ) : (
                   /* Case B: Uploaded Image Card & Analyse Button matching mockup 2 */
                   <div className="w-full px-5 mt-2 animate-fadeIn flex flex-col items-center">
-                    <div className="relative w-full aspect-[4/5] bg-black rounded-3xl overflow-hidden border border-zinc-800 shadow-xl">
+                    <div className="relative w-full max-w-md aspect-[4/5] bg-black rounded-3xl overflow-hidden border border-zinc-800 shadow-xl">
                       <img 
                         className="absolute inset-0 w-full h-full object-cover" 
                         src={uploadedBase64} 
@@ -1918,19 +2019,31 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Captured Image Section */}
-                <section className="w-full mb-4">
-                  <div className="relative w-full aspect-[4/3] rounded-3xl overflow-hidden border border-zinc-800 bg-zinc-950 shadow-2xl">
-                    <img alt="Scanned Leaf" className="w-full h-full object-cover" src={scanResult.imageUrl} />
-                    <div className="absolute bottom-3 right-3 bg-zinc-900/90 text-emerald-400 px-3 py-1.5 rounded-xl flex items-center gap-1.5 font-extrabold text-[10px] shadow-lg border border-emerald-500/20 backdrop-blur-sm uppercase tracking-wider">
-                      <span className="material-symbols-outlined text-[14px]">verified</span>
-                      {appLanguage === "Español (ES)" ? "Patología Analizada" : appLanguage === "Français (FR)" ? "Patologie Analysée" : "Pathology Scanned"}
+                <div className="grid grid-cols-1 md:grid-cols-12 gap-6 items-start mt-1 w-full text-left" id="scan-result-responsive-grid">
+                  
+                  {/* Left Column: Image & Direct Action Buttons (Desktop only) */}
+                  <div className="md:col-span-5 md:sticky md:top-20 z-20 flex flex-col gap-5 w-full">
+                    {/* Captured Image Section */}
+                    <section className="w-full">
+                      <div className="relative w-full aspect-[4/3] rounded-3xl overflow-hidden border border-zinc-800 bg-zinc-950 shadow-2xl">
+                        <img alt="Scanned Leaf" className="w-full h-full object-cover" src={scanResult.imageUrl} />
+                        <div className="absolute bottom-3 right-3 bg-zinc-900/90 text-emerald-400 px-3 py-1.5 rounded-xl flex items-center gap-1.5 font-extrabold text-[10px] shadow-lg border border-emerald-500/20 backdrop-blur-sm uppercase tracking-wider">
+                          <span className="material-symbols-outlined text-[14px]">verified</span>
+                          {appLanguage === "Español (ES)" ? "Patología Analizada" : appLanguage === "Français (FR)" ? "Patologie Analysée" : "Pathology Scanned"}
+                        </div>
+                      </div>
+                    </section>
+                    
+                    {/* Show Destination Selector & Action Buttons here (On Desktop/Tablet ONLY) */}
+                    <div className="hidden md:block w-full">
+                      {renderSaveAndActions()}
                     </div>
                   </div>
-                </section>
 
-                {/* Horizontal Navigation Pills (mockup icons list) */}
-                <div className="grid grid-cols-5 p-1 bg-zinc-900 border border-zinc-800/80 rounded-2xl mb-4 gap-1 shadow-inner">
+                  {/* Right Column: Information, Diagnosis Tabs & Content (Responsive) */}
+                  <div className="md:col-span-7 flex flex-col w-full">
+                    {/* Horizontal Navigation Pills (mockup icons list) */}
+                    <div className="grid grid-cols-5 p-1 bg-zinc-900 border border-zinc-800/80 rounded-2xl mb-4 gap-1 shadow-inner">
                   {[
                     { key: "identify", label: appLanguage === "Español (ES)" ? "Identificar" : appLanguage === "Français (FR)" ? "Identifier" : "Identify", icon: "eco" },
                     { key: "diseases", label: appLanguage === "Español (ES)" ? "Enfermedades" : appLanguage === "Français (FR)" ? "Maladies" : "Diseases", icon: "bug_report" },
@@ -2229,103 +2342,17 @@ export default function App() {
                       </div>
                     </div>
                   )}
-                </div>
-
-                {/* Destination Selector / Lock Notice */}
-                {!activeScanningPortfolioId ? (
-                  <div className="bg-zinc-900 border border-zinc-800 p-3.5 rounded-2xl mb-4 text-xs flex flex-col gap-1.5 shadow-md">
-                    <label className="text-[10px] font-extrabold text-zinc-400 block uppercase tracking-wider">
-                      {appLanguage === "Español (ES)" ? "Guardar Análisis de Diagnóstico En:" : appLanguage === "Français (FR)" ? "Enregistrer l'Analyse Dans:" : "Save Diagnostic Scan To:"}
-                    </label>
-                    <select
-                      value={saveTargetPortfolioId}
-                      onChange={(e) => setSaveTargetPortfolioId(e.target.value)}
-                      className="w-full h-11 px-3 bg-zinc-800 border border-zinc-700 rounded-xl text-white font-bold outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-all cursor-pointer text-xs"
-                      id="select-save-destination"
-                    >
-                      <option value="NEW">✨ {appLanguage === "Español (ES)" ? "Establecer como nuevo portafolio" : appLanguage === "Français (FR)" ? "Créer un nouveau portfolio" : "Establish as a New Portfolio"}</option>
-                      {cropPortfolios.map((portfolio) => (
-                        <option key={portfolio.id} value={portfolio.id}>
-                          📂 {portfolio.name} ({appLanguage === "Español (ES)" ? "Historial" : appLanguage === "Français (FR)" ? "Historique" : "History Log"})
-                        </option>
-                      ))}
-                    </select>
                   </div>
-                ) : (
-                  <div className="bg-emerald-950/40 border border-emerald-500/20 p-3.5 rounded-2xl mb-4 text-xs flex items-center justify-between shadow-md">
-                    <div className="flex items-center gap-2.5">
-                      <span className="material-symbols-outlined text-emerald-400 text-lg">folder_open</span>
-                      <div className="text-left">
-                        <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider block leading-none">
-                          {appLanguage === "Español (ES)" ? "Portafolio de Destino Bloqueado" : appLanguage === "Français (FR)" ? "Portfolio Cible Verrouillé" : "Target Portfolio Locked"}
-                        </span>
-                        <p className="text-white font-extrabold text-xs mt-1.5">
-                          {cropPortfolios.find(p => p.id === activeScanningPortfolioId)?.name || "Current Portfolio"}
-                        </p>
-                      </div>
-                    </div>
-                    <span className="text-[9px] bg-emerald-900/50 text-emerald-400 px-2 py-0.5 rounded font-black border border-emerald-500/20 uppercase tracking-widest shrink-0">
-                      {appLanguage === "Español (ES)" ? "Portafolio Enfocado" : appLanguage === "Français (FR)" ? "Portfolio Ciblé" : "Portfolio Focused"}
-                    </span>
-                  </div>
-                )}
 
-                {/* Action Buttons */}
-                <div className="flex flex-col gap-2.5 mb-6">
-                  <button 
-                    onClick={saveToPortfolio}
-                    className="w-full h-11 bg-primary text-on-primary rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 hover:bg-primary-container transition-all active:scale-95 shadow-sm"
-                    id="btn-save-diagnostics"
-                  >
-                    <span className="material-symbols-outlined text-base">
-                      {activeScanningPortfolioId || saveTargetPortfolioId !== "NEW" ? "history" : "folder_special"}
-                    </span>
-                    {activeScanningPortfolioId 
-                      ? (appLanguage === "Español (ES)" 
-                          ? `Guardar en Historial de ${cropPortfolios.find(p => p.id === activeScanningPortfolioId)?.name || ""}` 
-                          : appLanguage === "Français (FR)" 
-                            ? `Sauvegarder dans l'Historique de ${cropPortfolios.find(p => p.id === activeScanningPortfolioId)?.name || ""}` 
-                            : `Save to ${cropPortfolios.find(p => p.id === activeScanningPortfolioId)?.name || ""} History`
-                        )
-                      : (saveTargetPortfolioId === "NEW" 
-                          ? (appLanguage === "Español (ES)" ? "Guardar como Nuevo Portafolio" : appLanguage === "Français (FR)" ? "Créer Nouveau Portfolio" : "Save as New Portfolio")
-                          : (appLanguage === "Español (ES)" 
-                              ? `Actualizar Historial de ${cropPortfolios.find(p => p.id === saveTargetPortfolioId)?.name || ""}` 
-                              : appLanguage === "Français (FR)" 
-                                ? `Mettre à jour l'Historique de ${cropPortfolios.find(p => p.id === saveTargetPortfolioId)?.name || ""}` 
-                                : `Update ${cropPortfolios.find(p => p.id === saveTargetPortfolioId)?.name || ""} History`
-                            )
-                        )
-                    }
-                  </button>
-
-                  <div className="grid grid-cols-2 gap-2">
-                    <button 
-                      onClick={() => {
-                        setScanResult(null);
-                        setActiveScanningPortfolioId(null);
-                        setSaveTargetPortfolioId("NEW");
-                        showToast("Scan diagnosis aborted & discarded", "info");
-                        // If they started from a focused portfolio, keep selectedCropId so they return to that portfolio page, else crops list page
-                        setActiveTab("crops");
-                      }}
-                      className="h-11 border border-red-900/60 text-red-400 bg-red-950/20 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 hover:bg-red-950/40 transition-all active:scale-95 shadow-sm"
-                      id="btn-abort-diagnostics"
-                    >
-                      <span className="material-symbols-outlined text-base">cancel</span>
-                      {appLanguage === "Español (ES)" ? "Abortar Diagnóstico" : appLanguage === "Français (FR)" ? "Abandonner l'Analyse" : "Abort Diagnosis"}
-                    </button>
-
-                    <button 
-                      onClick={() => openExpertChat(scanResult.pestOrDisease || "Diseased Plant")}
-                      className="h-11 border border-zinc-800 text-zinc-300 bg-zinc-900 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 hover:bg-zinc-800 transition-all active:scale-95 shadow-sm"
-                    >
-                      <span className="material-symbols-outlined text-base">chat</span>
-                      {appLanguage === "Español (ES)" ? "Chat Agronómico" : appLanguage === "Français (FR)" ? "Chat Agronome" : "Agronomy Chat"}
-                    </button>
+                  {/* Show Destination Selector & Action Buttons here (On Mobile ONLY) */}
+                  <div className="block md:hidden w-full mt-4">
+                    {renderSaveAndActions()}
                   </div>
                 </div>
+
               </div>
+
+            </div>
             )}
           </div>
         )}
@@ -2586,7 +2613,7 @@ export default function App() {
       {/* Expert Chat Overlay Drawer */}
       {isChatOpen && (
         <div className="fixed inset-x-0 bottom-0 top-0 bg-black/60 backdrop-blur-sm z-50 flex items-end justify-center px-4 animate-fadeIn" id="expert-chat-drawer">
-          <div className="bg-surface-container-lowest rounded-t-2xl max-w-md w-full h-[85vh] flex flex-col shadow-2xl overflow-hidden border-t-2 border-primary">
+          <div className="bg-surface-container-lowest rounded-t-2xl max-w-md md:max-w-xl lg:max-w-2xl w-full h-[85vh] flex flex-col shadow-2xl overflow-hidden border-t-2 border-primary">
             
             {/* Drawer Header */}
             <div className="p-4 bg-surface border-b border-outline-variant flex justify-between items-center shrink-0">
@@ -2664,7 +2691,7 @@ export default function App() {
       {/* Create Portfolio Overlay Drawer */}
       {isCreatePortfolioOpen && (
         <div className="fixed inset-x-0 bottom-0 top-0 bg-black/60 backdrop-blur-sm z-50 flex items-end justify-center px-4 animate-fadeIn" id="create-portfolio-drawer">
-          <div className="bg-surface-container-lowest rounded-t-3xl max-w-md w-full h-[85vh] flex flex-col shadow-2xl overflow-hidden border-t-4 border-emerald-500">
+          <div className="bg-surface-container-lowest rounded-t-3xl max-w-md md:max-w-xl lg:max-w-2xl w-full h-[85vh] flex flex-col shadow-2xl overflow-hidden border-t-4 border-emerald-500">
             
             {/* Drawer Header */}
             <div className="p-4 bg-surface border-b border-outline-variant flex justify-between items-center shrink-0">
@@ -2812,7 +2839,7 @@ export default function App() {
           onClick={() => {
             setIsCreatePortfolioOpen(true);
           }}
-          className="fixed bottom-24 right-5 w-14 h-14 bg-tertiary-container text-on-tertiary-container rounded-full flex items-center justify-center shadow-2xl border-4 border-tertiary hover:scale-110 active:scale-95 transition-all z-30 cursor-pointer"
+          className="fixed bottom-24 right-5 md:right-[8%] lg:right-[15%] xl:right-[20%] w-14 h-14 bg-tertiary-container text-on-tertiary-container rounded-full flex items-center justify-center shadow-2xl border-4 border-tertiary hover:scale-110 active:scale-95 transition-all z-30 cursor-pointer"
           id="crop-list-add-fab"
         >
           <span className="material-symbols-outlined text-[32px] font-semibold">add</span>
@@ -2822,7 +2849,7 @@ export default function App() {
       {/* Support Chat Overlay Drawer */}
       {isSupportChatOpen && (
         <div className="fixed inset-x-0 bottom-0 top-0 bg-black/60 backdrop-blur-sm z-50 flex items-end justify-center px-4 animate-fadeIn" id="support-chat-drawer">
-          <div className="bg-surface-container-lowest rounded-t-2xl max-w-md w-full h-[85vh] flex flex-col shadow-2xl overflow-hidden border-t-2 border-primary">
+          <div className="bg-surface-container-lowest rounded-t-2xl max-w-md md:max-w-xl lg:max-w-2xl w-full h-[85vh] flex flex-col shadow-2xl overflow-hidden border-t-2 border-primary">
             
             {/* Drawer Header */}
             <div className="p-4 bg-surface border-b border-outline-variant flex justify-between items-center shrink-0">
@@ -2957,7 +2984,7 @@ export default function App() {
 
 
       {/* BottomNavBar */}
-      <nav className="fixed bottom-0 max-w-md w-full z-40 flex justify-around items-center px-2 pb-3 pt-2.5 bg-surface border-t border-outline-variant rounded-t-2xl shadow-xl">
+      <nav className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-full md:max-w-3xl lg:max-w-5xl xl:max-w-7xl z-40 flex justify-around items-center px-6 md:px-12 pb-3 pt-2.5 bg-surface border-t border-outline-variant md:rounded-t-2xl shadow-xl">
         
         {/* Crops Tab */}
         <button 
