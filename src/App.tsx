@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef } from "react";
+import LoginPage from "./components/LoginPage";
 import { initialCropPortfolios } from "./data";
 import { CropPortfolio, StatusType, Activity } from "./types";
-import { auth, db, handleFirestoreError, OperationType } from "./firebase";
-import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut, User } from "firebase/auth";
-import { collection, doc, setDoc, deleteDoc, onSnapshot, query, where } from "firebase/firestore";
+import { auth, handleFirestoreError, OperationType } from "./firebase";
+import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut, User, signInWithEmailAndPassword, createUserWithEmailAndPassword, updateProfile, updatePassword } from "firebase/auth";
 
 function deduplicatePortfolios(arr: CropPortfolio[]): CropPortfolio[] {
   if (!arr || !Array.isArray(arr)) return [];
@@ -268,6 +268,58 @@ const translations = {
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState(true);
+  const [isGuestMode, setIsGuestMode] = useState<boolean>(() => {
+    return localStorage.getItem("agriscan_guest_allowed") === "true";
+  });
+
+  // Helper fetch method with transparent JWT auth token insertion
+  async function apiFetch(path: string, options: RequestInit = {}) {
+    const headers = {
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+    } as Record<string, string>;
+
+    if (auth.currentUser) {
+      const token = await auth.currentUser.getIdToken();
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+
+    const res = await fetch(path, { ...options, headers });
+    if (!res.ok) {
+      const errText = await res.text();
+      let errJSON;
+      try { errJSON = JSON.parse(errText); } catch (e) {}
+      throw new Error(errJSON?.error || errText || `HTTP error ${res.status}`);
+    }
+    return res.json();
+  }
+
+  // Helper to parse file and upload it to Supabase Cloud SQL storage bucket
+  const uploadFileToStorage = async (file: File): Promise<string> => {
+    return new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const base64Data = reader.result as string;
+        try {
+          const payload = {
+            fileName: file.name,
+            mimeType: file.type || "image/jpeg",
+            fileData: base64Data,
+          };
+          const res = await apiFetch("/api/storage/upload", {
+            method: "POST",
+            body: JSON.stringify(payload),
+          });
+          resolve(res.url); // Returns the "/api/storage/file/:fileId" endpoint
+        } catch (err) {
+          console.error("Storage upload failed, falling back to local base64:", err);
+          resolve(base64Data); // Fallback to base64 if upload fails
+        }
+      };
+      reader.onerror = (e) => reject(e);
+      reader.readAsDataURL(file);
+    });
+  };
 
   // Authenticate with Google popup
   const handleGoogleSignIn = async () => {
@@ -287,6 +339,30 @@ export default function App() {
   useEffect(() => {
     const unsubAuth = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
+      if (currentUser) {
+        setIsGuestMode(false);
+        localStorage.removeItem("agriscan_guest_allowed");
+        
+        // Populate profile dynamically from Firebase Auth user
+        const displayName = currentUser.displayName || currentUser.email?.split("@")[0] || "Thomas Miller";
+        const email = currentUser.email || "t.miller@greenfield.farm";
+        setUserName(displayName);
+        setUserEmail(email);
+        setTempName(displayName);
+        setTempEmail(email);
+        localStorage.setItem("agriscan_profile_name", displayName);
+        localStorage.setItem("agriscan_profile_email", email);
+
+        // sync personal info name as well
+        setPersonalInfo(prev => {
+          const updated = {
+            ...prev,
+            fullName: currentUser.displayName || prev.fullName
+          };
+          localStorage.setItem("agriscan_personal_info", JSON.stringify(updated));
+          return updated;
+        });
+      }
       setIsAuthLoading(false);
     });
     return () => unsubAuth();
@@ -307,6 +383,56 @@ export default function App() {
   useEffect(() => {
     setPortfolioViewMode("index");
   }, [selectedCropId]);
+
+  // Touch gesture swipe navigation
+  const [touchStartX, setTouchStartX] = useState<number | null>(null);
+  const [touchStartY, setTouchStartY] = useState<number | null>(null);
+
+  const handleTouchStart = (e: React.TouchEvent) => {
+    const target = e.target as HTMLElement;
+    if (
+      target.closest('input[type="range"]') || 
+      target.closest('.no-swipe') ||
+      isSupportChatOpen
+    ) {
+      return;
+    }
+    setTouchStartX(e.touches[0].clientX);
+    setTouchStartY(e.touches[0].clientY);
+  };
+
+  const handleTouchEnd = (e: React.TouchEvent) => {
+    if (touchStartX === null || touchStartY === null) return;
+    
+    const touchEndX = e.changedTouches[0].clientX;
+    const touchEndY = e.changedTouches[0].clientY;
+    
+    const deltaX = touchEndX - touchStartX;
+    const deltaY = touchEndY - touchStartY;
+    
+    const minDistance = 60; // minimum touch distance
+    
+    if (Math.abs(deltaX) > minDistance && Math.abs(deltaX) > Math.abs(deltaY) * 1.8) {
+      if (deltaX < 0) {
+        // Swipe Left (crops -> scan -> settings)
+        if (activeTab === "crops" && !selectedCropId) {
+          setActiveTab("scan");
+        } else if (activeTab === "scan") {
+          setActiveTab("settings");
+        }
+      } else {
+        // Swipe Right (settings -> scan -> crops)
+        if (activeTab === "settings") {
+          setActiveTab("scan");
+        } else if (activeTab === "scan") {
+          setActiveTab("crops");
+        }
+      }
+    }
+    
+    setTouchStartX(null);
+    setTouchStartY(null);
+  };
 
   const t = (key: keyof typeof translations["English (US)"]): string => {
     const dict = translations[appLanguage as keyof typeof translations] || translations["English (US)"];
@@ -376,20 +502,7 @@ export default function App() {
 
   // System Sync Engine: Real-time Cloud database binding with secure local-offline fallback
   useEffect(() => {
-    if (user) {
-      const q = query(collection(db, "portfolios"), where("ownerId", "==", user.uid));
-      const unsubscribeSnap = onSnapshot(q, (snapshot) => {
-        const cloudList: CropPortfolio[] = [];
-        snapshot.forEach((docSnap) => {
-          cloudList.push(docSnap.data() as CropPortfolio);
-        });
-        setCropPortfolios(deduplicatePortfolios(cloudList));
-      }, (err) => {
-        handleFirestoreError(err, OperationType.GET, "portfolios");
-      });
-      return () => unsubscribeSnap();
-    } else {
-      // Local recovery
+    const loadLocalStoragePortfolios = () => {
       try {
         const saved = localStorage.getItem("agriscan_portfolios");
         if (saved) {
@@ -403,6 +516,29 @@ export default function App() {
         console.error("Error loading portfolios from localStorage:", e);
       }
       setCropPortfolios([]);
+    };
+
+    if (user) {
+      const syncAndLoad = async () => {
+        try {
+          // Sync User info on Login
+          await apiFetch("/api/users/sync", { method: "POST" });
+          
+          // Get portfolios from Cloud SQL Database
+          const cloudList = await apiFetch("/api/portfolios");
+          setCropPortfolios(deduplicatePortfolios(cloudList));
+          
+          showToast("Cloud portfolios synchronized completely!", "success");
+        } catch (err: any) {
+          console.error("Cloud SQL synchronisation failed:", err);
+          showToast("Offline mode. Loading local cache.", "info");
+          loadLocalStoragePortfolios();
+        }
+      };
+      
+      syncAndLoad();
+    } else {
+      loadLocalStoragePortfolios();
     }
   }, [user]);
 
@@ -507,10 +643,14 @@ export default function App() {
     if (user) {
       newPortfolio.ownerId = user.uid;
       try {
-        await setDoc(doc(db, "portfolios", newID), newPortfolio);
-        showToast(`Portfolio "${newPortfolioName}" synced to cloud!`, "success");
-      } catch (err) {
-        handleFirestoreError(err, OperationType.WRITE, `portfolios/${newID}`);
+        await apiFetch("/api/portfolios", {
+          method: "POST",
+          body: JSON.stringify(newPortfolio)
+        });
+        setCropPortfolios((prev) => [newPortfolio, ...prev]);
+        showToast(`Portfolio "${newPortfolioName}" synced to Cloud SQL!`, "success");
+      } catch (err: any) {
+        showToast(`Syncing to cloud failed: ${err.message}`, "error");
       }
     } else {
       setCropPortfolios((prev) => [newPortfolio, ...prev]);
@@ -538,11 +678,67 @@ export default function App() {
   const [pestAlerts, setPestAlerts] = useState(true);
   const [weatherUpdates, setWeatherUpdates] = useState(false);
   const [appLanguage, setAppLanguage] = useState("English (US)");
-  const [userName, setUserName] = useState("Thomas Miller");
-  const [userEmail, setUserEmail] = useState("t.miller@greenfield.farm");
+  const [userName, setUserName] = useState(() => {
+    return localStorage.getItem("agriscan_profile_name") || "Thomas Miller";
+  });
+  const [userEmail, setUserEmail] = useState(() => {
+    return localStorage.getItem("agriscan_profile_email") || "t.miller@greenfield.farm";
+  });
   const [isEditingProfile, setIsEditingProfile] = useState(false);
-  const [tempName, setTempName] = useState("Thomas Miller");
-  const [tempEmail, setTempEmail] = useState("t.miller@greenfield.farm");
+  const [tempName, setTempName] = useState(() => {
+    return localStorage.getItem("agriscan_profile_name") || "Thomas Miller";
+  });
+  const [tempEmail, setTempEmail] = useState(() => {
+    return localStorage.getItem("agriscan_profile_email") || "t.miller@greenfield.farm";
+  });
+
+  // Personal Info and Security Drawers State
+  const [isPersonalInfoOpen, setIsPersonalInfoOpen] = useState(false);
+  const [isSecurityOpen, setIsSecurityOpen] = useState(false);
+
+  // Loaded personal information state with default fallback values
+  const [personalInfo, setPersonalInfo] = useState(() => {
+    const saved = localStorage.getItem("agriscan_personal_info");
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        console.error(e);
+      }
+    }
+    return {
+      fullName: "Thomas Miller",
+      phone: "+1 555-019-2834",
+      region: "Midwest Grasslands",
+      farmingFocus: "Maize & Soybeans",
+      acreage: "120 acres"
+    };
+  });
+
+  const [tempPersonalInfo, setTempPersonalInfo] = useState({ ...personalInfo });
+
+  // Security elements
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [isSecurityLoading, setIsSecurityLoading] = useState(false);
+
+  // Passcode Lock Settings
+  const [isPinEnabled, setIsPinEnabled] = useState(() => {
+    return localStorage.getItem("agriscan_pin_enabled") === "true";
+  });
+  const [pinCode, setPinCode] = useState(() => {
+    return localStorage.getItem("agriscan_pin_code") || "";
+  });
+  const [tempPin, setTempPin] = useState(() => {
+    return localStorage.getItem("agriscan_pin_code") || "";
+  });
+
+  // Is App Locked?
+  const [isAppLocked, setIsAppLocked] = useState(() => {
+    return localStorage.getItem("agriscan_pin_enabled") === "true" && !!localStorage.getItem("agriscan_pin_code");
+  });
+  const [enteredPin, setEnteredPin] = useState("");
+  const [pinError, setPinError] = useState(false);
 
   const currentUserName = userName;
   const currentUserEmail = userEmail;
@@ -829,6 +1025,8 @@ export default function App() {
       if (user) {
         try {
           await signOut(auth);
+          setIsGuestMode(false);
+          localStorage.removeItem("agriscan_guest_allowed");
           setPendingReset(false);
           showToast("Signed out successfully from Google account", "success");
         } catch (err) {
@@ -838,6 +1036,8 @@ export default function App() {
       } else {
         setCropPortfolios(initialCropPortfolios);
         localStorage.removeItem("agriscan_portfolios");
+        setIsGuestMode(false);
+        localStorage.removeItem("agriscan_guest_allowed");
         setSelectedCropId(null);
         setScanResult(null);
         setPendingReset(false);
@@ -873,16 +1073,28 @@ export default function App() {
   ];
 
   // Helper to handle local custom file uploads
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      setUploadedBase64(reader.result as string);
-      setSelectedPresetImage(null);
-    };
-    reader.readAsDataURL(file);
+    if (user) {
+      showToast("Uploading leaf photo to Supabase storage...", "info");
+      try {
+        const url = await uploadFileToStorage(file);
+        setUploadedBase64(url);
+        setSelectedPresetImage(null);
+        showToast("Uploaded successfully to Cloud storage!", "success");
+      } catch (err) {
+        showToast("Uploading failed. Fallback to local memory.", "info");
+      }
+    } else {
+      const reader = new FileReader();
+      reader.onload = () => {
+        setUploadedBase64(reader.result as string);
+        setSelectedPresetImage(null);
+      };
+      reader.readAsDataURL(file);
+    }
   };
 
   // Open Chat with Expert dialog
@@ -926,15 +1138,26 @@ export default function App() {
   };
 
   // Helper to handle custom cover page uploading for portfolios
-  const handlePortfolioCoverUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handlePortfolioCoverUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      setNewPortfolioImage(reader.result as string);
-    };
-    reader.readAsDataURL(file);
+    if (user) {
+      showToast("Uploading cover photo to Supabase storage...", "info");
+      try {
+        const url = await uploadFileToStorage(file);
+        setNewPortfolioImage(url);
+        showToast("Uploaded cover successfully to Cloud storage!", "success");
+      } catch (err) {
+        showToast("Uploading failed. Fallback to local memory.", "info");
+      }
+    } else {
+      const reader = new FileReader();
+      reader.onload = () => {
+        setNewPortfolioImage(reader.result as string);
+      };
+      reader.readAsDataURL(file);
+    }
   };
 
   // Helper to delete a crop portfolio
@@ -942,12 +1165,13 @@ export default function App() {
     if (pendingDeletePortfolioId === id) {
       if (user) {
         try {
-          await deleteDoc(doc(db, "portfolios", id));
+          await apiFetch(`/api/portfolios/${id}`, { method: "DELETE" });
+          setCropPortfolios((prev) => prev.filter((p) => p.id !== id));
           setSelectedCropId(null);
           setPendingDeletePortfolioId(null);
-          showToast("Portfolio deleted successfully from cloud", "info");
-        } catch (err) {
-          handleFirestoreError(err, OperationType.DELETE, `portfolios/${id}`);
+          showToast("Portfolio deleted successfully from Cloud SQL", "info");
+        } catch (err: any) {
+          showToast(`Failed to delete: ${err.message}`, "error");
         }
       } else {
         setCropPortfolios((prev) => prev.filter((p) => p.id !== id));
@@ -972,11 +1196,17 @@ export default function App() {
         };
         if (user) {
           try {
-            await setDoc(doc(db, "portfolios", portfolioId), updatedCrop);
+            await apiFetch(`/api/portfolios/${portfolioId}`, {
+              method: "PUT",
+              body: JSON.stringify(updatedCrop)
+            });
+            setCropPortfolios((prev) =>
+              prev.map((p) => (p.id === portfolioId ? updatedCrop : p))
+            );
             setPendingDeleteScanId(null);
-            showToast("Diagnostic scan record deleted from cloud", "info");
-          } catch (err) {
-            handleFirestoreError(err, OperationType.WRITE, `portfolios/${portfolioId}`);
+            showToast("Diagnostic scan record deleted from Cloud SQL", "info");
+          } catch (err: any) {
+            showToast(`Delete failed: ${err.message}`, "error");
           }
         } else {
           setCropPortfolios((prev) =>
@@ -1026,12 +1256,18 @@ export default function App() {
 
       if (user) {
         try {
-          await setDoc(doc(db, "portfolios", portfolioId), updatedCrop);
+          await apiFetch(`/api/portfolios/${portfolioId}`, {
+            method: "PUT",
+            body: JSON.stringify(updatedCrop)
+          });
+          setCropPortfolios((prev) =>
+            prev.map((p) => (p.id === portfolioId ? updatedCrop : p))
+          );
           setNewLogNotes("Observed physical development parameters look normal and stable.");
           setIsAddingGrowthLog(false);
-          showToast("Growth log entry recorded in cloud!", "success");
-        } catch (err) {
-          handleFirestoreError(err, OperationType.WRITE, `portfolios/${portfolioId}`);
+          showToast("Growth log entry recorded in Cloud SQL!", "success");
+        } catch (err: any) {
+          showToast(`Add growth log failed: ${err.message}`, "error");
         }
       } else {
         setCropPortfolios((prev) =>
@@ -1065,11 +1301,17 @@ export default function App() {
         };
         if (user) {
           try {
-            await setDoc(doc(db, "portfolios", portfolioId), updatedCrop);
+            await apiFetch(`/api/portfolios/${portfolioId}`, {
+              method: "PUT",
+              body: JSON.stringify(updatedCrop)
+            });
+            setCropPortfolios((prev) =>
+              prev.map((p) => (p.id === portfolioId ? updatedCrop : p))
+            );
             setPendingDeleteLogId(null);
-            showToast("Growth log entry removed from cloud database", "info");
-          } catch (err) {
-            handleFirestoreError(err, OperationType.WRITE, `portfolios/${portfolioId}`);
+            showToast("Growth log entry removed from Cloud SQL", "info");
+          } catch (err: any) {
+            showToast(`Delete failed: ${err.message}`, "error");
           }
         } else {
           setCropPortfolios((prev) =>
@@ -1258,10 +1500,14 @@ export default function App() {
       if (user) {
         newCrop.ownerId = user.uid;
         try {
-          await setDoc(doc(db, "portfolios", newId), newCrop);
-          showToast("Diagnostic analysis synced to new Cloud Portfolio", "success");
-        } catch (err) {
-          handleFirestoreError(err, OperationType.WRITE, `portfolios/${newId}`);
+          await apiFetch("/api/portfolios", {
+            method: "POST",
+            body: JSON.stringify(newCrop)
+          });
+          setCropPortfolios((prev) => [newCrop, ...prev]);
+          showToast("Diagnostic analysis synced to new Cloud SQL Portfolio", "success");
+        } catch (err: any) {
+          showToast(`Cloud portfolio sync failed: ${err.message}`, "error");
         }
       } else {
         setCropPortfolios((prev) => [newCrop, ...prev]);
@@ -1321,10 +1567,16 @@ export default function App() {
 
         if (user) {
           try {
-            await setDoc(doc(db, "portfolios", saveTargetPortfolioId), updatedCrop);
-            showToast("Diagnostic medical scan appended to Cloud database", "success");
-          } catch (err) {
-            handleFirestoreError(err, OperationType.WRITE, `portfolios/${saveTargetPortfolioId}`);
+            await apiFetch(`/api/portfolios/${saveTargetPortfolioId}`, {
+              method: "PUT",
+              body: JSON.stringify(updatedCrop)
+            });
+            setCropPortfolios((prev) =>
+              prev.map((p) => (p.id === saveTargetPortfolioId ? updatedCrop : p))
+            );
+            showToast("Diagnostic medical scan synced to Cloud SQL", "success");
+          } catch (err: any) {
+            showToast(`Saving to Cloud SQL failed: ${err.message}`, "error");
           }
         } else {
           setCropPortfolios((prev) =>
@@ -1349,38 +1601,38 @@ export default function App() {
       <div className="w-full flex flex-col gap-4">
         {/* Destination Selector / Lock Notice */}
         {!activeScanningPortfolioId ? (
-          <div className="bg-zinc-900 border border-zinc-800 p-3.5 rounded-2xl text-xs flex flex-col gap-1.5 shadow-md text-left">
-            <label className="text-[10px] font-extrabold text-zinc-400 block uppercase tracking-wider">
+          <div className="bg-surface-container border border-outline-variant p-3.5 rounded-2xl text-xs flex flex-col gap-1.5 shadow-md text-left">
+            <label className="text-[10px] font-extrabold text-on-surface-variant block uppercase tracking-wider">
               {appLanguage === "Español (ES)" ? "Guardar Análisis de Diagnóstico En:" : appLanguage === "Français (FR)" ? "Enregistrer l'Analyse Dans:" : "Save Diagnostic Scan To:"}
             </label>
             <select
               value={saveTargetPortfolioId}
               onChange={(e) => setSaveTargetPortfolioId(e.target.value)}
-              className="w-full h-11 px-3 bg-zinc-800 border border-zinc-700 rounded-xl text-white font-bold outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-all cursor-pointer text-xs"
+              className="w-full h-11 px-3 bg-surface-container-lowest border border-outline-variant rounded-xl text-on-surface font-semibold outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-all cursor-pointer text-xs"
               id="select-save-destination"
             >
-              <option value="NEW">✨ {appLanguage === "Español (ES)" ? "Establecer como nuevo portafolio" : appLanguage === "Français (FR)" ? "Créer un nouveau portfolio" : "Establish as a New Portfolio"}</option>
+              <option value="NEW" className="bg-surface text-on-surface">✨ {appLanguage === "Español (ES)" ? "Establecer como nuevo portafolio" : appLanguage === "Français (FR)" ? "Créer un nouveau portfolio" : "Establish as a New Portfolio"}</option>
               {cropPortfolios.map((portfolio) => (
-                <option key={portfolio.id} value={portfolio.id}>
+                <option key={portfolio.id} value={portfolio.id} className="bg-surface text-on-surface">
                   📂 {portfolio.name} ({appLanguage === "Español (ES)" ? "Historial" : appLanguage === "Français (FR)" ? "Historique" : "History Log"})
                 </option>
               ))}
             </select>
           </div>
         ) : (
-          <div className="bg-emerald-950/40 border border-emerald-500/20 p-3.5 rounded-2xl text-xs flex items-center justify-between shadow-md text-left">
+          <div className="bg-emerald-500/10 border border-emerald-500/20 p-3.5 rounded-2xl text-xs flex items-center justify-between shadow-md text-left">
             <div className="flex items-center gap-2.5">
-              <span className="material-symbols-outlined text-emerald-400 text-lg">folder_open</span>
+              <span className="material-symbols-outlined text-emerald-600 dark:text-emerald-400 text-lg">folder_open</span>
               <div className="text-left">
-                <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider block leading-none">
+                <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider block leading-none">
                   {appLanguage === "Español (ES)" ? "Portafolio de Destino Bloqueado" : appLanguage === "Français (FR)" ? "Portfolio Cible Verrouillé" : "Target Portfolio Locked"}
                 </span>
-                <p className="text-white font-extrabold text-xs mt-1.5">
+                <p className="text-on-surface font-extrabold text-xs mt-1.5">
                   {cropPortfolios.find(p => p.id === activeScanningPortfolioId)?.name || "Current Portfolio"}
                 </p>
               </div>
             </div>
-            <span className="text-[9px] bg-emerald-900/50 text-emerald-400 px-2 py-0.5 rounded font-black border border-emerald-500/20 uppercase tracking-widest shrink-0">
+            <span className="text-[9px] bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 px-2 py-0.5 rounded font-black border border-emerald-500/20 uppercase tracking-widest shrink-0">
               {appLanguage === "Español (ES)" ? "Portafolio Enfocado" : appLanguage === "Français (FR)" ? "Portfolio Ciblé" : "Portfolio Focused"}
             </span>
           </div>
@@ -1424,7 +1676,7 @@ export default function App() {
                 showToast("Scan diagnosis aborted & discarded", "info");
                 setActiveTab("crops");
               }}
-              className="h-11 border border-red-900/60 text-red-400 bg-red-950/20 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 hover:bg-red-950/40 transition-all active:scale-95 shadow-sm cursor-pointer"
+              className="h-11 border border-red-500/20 text-red-650 dark:text-red-400 bg-red-550/10 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 hover:bg-red-550/20 transition-all active:scale-95 shadow-sm cursor-pointer"
               id="btn-abort-diagnostics"
             >
               <span className="material-symbols-outlined text-base">cancel</span>
@@ -1433,7 +1685,7 @@ export default function App() {
 
             <button 
               onClick={() => openExpertChat(scanResult?.pestOrDisease || "Diseased Plant")}
-              className="h-11 border border-zinc-800 text-zinc-300 bg-zinc-900 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 hover:bg-zinc-800 transition-all active:scale-95 shadow-sm cursor-pointer"
+              className="h-11 border border-outline-variant text-on-surface bg-surface-container rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 hover:bg-surface-container-high transition-all active:scale-95 shadow-sm cursor-pointer"
             >
               <span className="material-symbols-outlined text-base">chat</span>
               {appLanguage === "Español (ES)" ? "Chat Agronómico" : appLanguage === "Français (FR)" ? "Chat Agronome" : "Agronomy Chat"}
@@ -1445,10 +1697,43 @@ export default function App() {
   };
 
 
+  if (isAuthLoading) {
+    return (
+      <div className="min-h-screen bg-[#070e0a] flex flex-col items-center justify-center text-white font-sans select-none gap-4">
+        <div className="w-16 h-16 rounded-3xl bg-emerald-600/10 border border-emerald-500/20 flex items-center justify-center shadow-2xl animate-spin text-emerald-400">
+          <span className="material-symbols-outlined text-4xl font-bold">eco</span>
+        </div>
+        <div className="flex flex-col items-center text-center">
+          <h2 className="font-extrabold tracking-tight text-lg text-emerald-50">AgriScan AI</h2>
+          <p className="text-[11px] font-mono tracking-widest text-emerald-400 mt-1 uppercase font-semibold">Loading Diagnostics Profile...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user && !isGuestMode) {
+    return (
+      <LoginPage 
+        onLoginSuccess={() => {
+          setIsGuestMode(false);
+          localStorage.removeItem("agriscan_guest_allowed");
+        }}
+        onContinueAsGuest={() => {
+          setIsGuestMode(true);
+          localStorage.setItem("agriscan_guest_allowed", "true");
+          showToast("Using offline Sandbox mode. Diagnostic sync will remain offline.", "info");
+        }}
+      />
+    );
+  }
+
   return (
     <div 
       style={themes[appTheme] || {}} 
-      className="bg-background text-on-background min-h-screen flex flex-col font-sans w-full max-w-none md:max-w-3xl lg:max-w-5xl xl:max-w-7xl mx-auto relative md:border-x border-outline-variant md:shadow-xl"
+    
+      className="bg-background text-on-background min-h-screen flex flex-col font-sans w-full max-w-none md:max-w-3xl lg:max-w-5xl xl:max-w-7xl mx-auto relative md:border-x border-outline-variant md:shadow-xl outline-none"
+      onTouchStart={handleTouchStart}
+      onTouchEnd={handleTouchEnd}
     >
       
       {/* TopAppBar */}
@@ -1624,14 +1909,16 @@ export default function App() {
                       />
                       <div className="absolute inset-0 bg-gradient-to-t from-primary/70 via-primary/20 to-transparent"></div>
                       
+                      {/* Standalone circular floating back arrow at top-left, not a full bar */}
+                      <button 
+                        onClick={() => setSelectedCropId(null)}
+                        className="absolute top-4 left-5 w-10 h-10 rounded-full bg-black/40 backdrop-blur-md border border-white/10 text-white flex items-center justify-center transition-all active:scale-90 hover:bg-black/65 z-30 shadow-md cursor-pointer"
+                        title={t("backToPortfolios")}
+                      >
+                        <span className="material-symbols-outlined text-lg">arrow_back</span>
+                      </button>
+                      
                       <div className="absolute bottom-4 left-5 right-5">
-                        <button 
-                          onClick={() => setSelectedCropId(null)}
-                          className="flex items-center gap-1 text-white/90 mb-1 active:scale-95 transition-transform"
-                        >
-                          <span className="material-symbols-outlined text-sm">arrow_back</span>
-                          <span className="text-xs font-semibold tracking-wider uppercase font-sans">{t("backToPortfolios")}</span>
-                        </button>
                         <h2 className="text-2xl font-bold text-white tracking-tight">{selectedCrop.name}</h2>
                         {selectedCrop.scienceName && (
                           <p className="text-xs text-secondary-container italic font-medium -mt-0.5">{selectedCrop.scienceName}</p>
@@ -1639,14 +1926,14 @@ export default function App() {
                       </div>
                     </div>
                   ) : (
-                    /* Slim Top Header Bar for Sub-Pages */
-                    <div className="sticky top-0 bg-surface/95 backdrop-blur-md border-b border-outline-variant/60 px-5 py-4 flex items-center gap-3.5 z-40 animate-fadeIn text-on-surface">
+                    /* Slim Top Header Bar for Sub-Pages - clean transparent with no thick borders/strip */
+                    <div className="sticky top-0 bg-background/95 backdrop-blur-md px-5 py-4 flex items-center gap-3 z-40 animate-fadeIn text-on-surface">
                       <button 
                         onClick={() => setPortfolioViewMode("index")}
-                        className="w-10 h-10 rounded-full bg-surface-container hover:bg-surface-container-high text-on-surface flex items-center justify-center transition-transform active:scale-95 border border-outline-variant/10"
+                        className="w-10 h-10 rounded-full bg-surface-container hover:bg-surface-container-high text-on-surface flex items-center justify-center transition-transform active:scale-95"
                         title="Back to portfolio overview"
                       >
-                        <span className="material-symbols-outlined text-lg font-black">arrow_back</span>
+                        <span className="material-symbols-outlined text-lg">arrow_back</span>
                       </button>
                       <div className="min-w-0 flex-1 text-left">
                         <h3 className="font-sans font-extrabold text-xs text-primary uppercase tracking-wider leading-none">
@@ -1708,14 +1995,14 @@ export default function App() {
 
                         <div className="flex flex-col gap-3.5">
                           {(!selectedCrop.scanHistory || selectedCrop.scanHistory.length === 0) ? (
-                            <div className="bg-zinc-50 border border-dashed border-zinc-200 rounded-2xl p-6 text-center text-zinc-500">
-                              <span className="material-symbols-outlined text-4xl text-zinc-300">history_toggle_off</span>
+                            <div className="bg-surface-container-high/40 border border-dashed border-outline-variant rounded-2xl p-6 text-center text-on-surface-variant">
+                              <span className="material-symbols-outlined text-4xl text-outline-variant">history_toggle_off</span>
                               <p className="text-xs font-bold mt-2">
                                 {appLanguage === "Español (ES)" ? "Aún no hay análisis históricos guardados" :
                                  appLanguage === "Français (FR)" ? "Aucun rapport d'analyse enregistré" :
                                  "No historical scans saved to this folder yet"}
                               </p>
-                              <p className="text-[10px] text-zinc-400 mt-0.5 max-w-[240px] mx-auto">
+                              <p className="text-[10px] text-on-surface-variant/80 mt-0.5 max-w-[240px] mx-auto">
                                 {appLanguage === "Español (ES)" ? "Diagnostique hojas usando el escáner o suba fotos para adjuntar bitácoras de patología." :
                                  appLanguage === "Français (FR)" ? "Diagnostiquez des feuilles via l'analyseur ou téléchargez des photos pour ajouter des journaux de pathologie." :
                                  "Diagnose leaf specimens via the live radar or upload a photo to append scientific pathology logs."}
@@ -1739,7 +2026,7 @@ export default function App() {
                                   className="bg-surface-container-lowest border border-outline-variant hover:border-emerald-500 rounded-2xl overflow-hidden p-3 shadow-sm hover:shadow transition-all cursor-pointer active:scale-[0.99] flex flex-col gap-3"
                                 >
                                   <div className="flex gap-3">
-                                    <div className="w-16 h-16 rounded-xl overflow-hidden bg-zinc-55 bg-zinc-50 border border-zinc-150 shrink-0">
+                                    <div className="w-16 h-16 rounded-xl overflow-hidden bg-surface-container border border-outline-variant shrink-0">
                                       <img 
                                         className="w-full h-full object-cover" 
                                         src={hist.imageUrl || selectedCrop.image} 
@@ -1756,7 +2043,7 @@ export default function App() {
                                         </div>
                                         <div className="flex items-center gap-1.5 shrink-0">
                                           <span className={`text-[9px] font-black uppercase px-2 py-0.5 rounded-full tracking-wider ${
-                                            isFine ? "bg-teal-50 text-teal-700 border border-teal-200" : "bg-red-50 text-red-700 border border-red-100"
+                                            isFine ? "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400 border border-emerald-200/30" : "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400 border border-red-100/30"
                                           }`}>
                                             {hist.healthStatus || "Infected"}
                                           </span>
@@ -1768,7 +2055,7 @@ export default function App() {
                                             className={`w-6 h-6 rounded-full flex items-center justify-center transition-all border ${
                                               pendingDeleteScanId === hist.id
                                                 ? "bg-amber-500 border-amber-400 text-white animate-pulse"
-                                                : "bg-red-50 hover:bg-red-100 text-red-600 border border-red-200/30"
+                                                : "bg-red-50 hover:bg-red-100 dark:bg-red-950/20 text-red-600 border border-red-200/30"
                                             }`}
                                             title="Delete Scan Record"
                                             id={`btn-delete-scan-${hist.id || hIdx}`}
@@ -1781,12 +2068,12 @@ export default function App() {
                                       </div>
                                       
                                       <p className="text-xs text-on-surface-variant font-bold mt-1.5 truncate text-left">
-                                        {t("diagnosis")}: <span className="text-emerald-700 font-extrabold">{hist.pestOrDisease || "Healthy"}</span>
+                                        {t("diagnosis")}: <span className="text-emerald-700 dark:text-emerald-400 font-extrabold">{hist.pestOrDisease || "Healthy"}</span>
                                       </p>
                                     </div>
                                   </div>
 
-                                  <p className="text-xs text-on-surface-variant/85 font-medium line-clamp-2 -mt-1 leading-normal italic bg-zinc-50/50 p-2.5 rounded-xl border border-zinc-100 text-left">
+                                  <p className="text-xs text-on-surface-variant/85 font-medium line-clamp-2 -mt-1 leading-normal italic bg-surface-container/50 border border-outline-variant text-left p-2.5 rounded-xl">
                                     {hist.description}
                                   </p>
 
@@ -1794,7 +2081,7 @@ export default function App() {
                                     <div className="pt-2 border-t border-dashed border-outline-variant/60 flex flex-wrap gap-1 items-center justify-between">
                                       <div className="flex gap-1 overflow-hidden max-w-[200px]">
                                         {hist.solutions.slice(0, 2).map((sol: string, sIdx: number) => (
-                                          <span key={sIdx} className="bg-zinc-50 border border-zinc-100 text-zinc-600 text-[9px] px-1.5 py-0.5 rounded font-black truncate max-w-[90px]">
+                                          <span key={sIdx} className="bg-surface-container border border-outline-variant text-on-surface-variant text-[9px] px-1.5 py-0.5 rounded font-black truncate max-w-[90px]">
                                             {sol}
                                           </span>
                                         ))}
@@ -1852,19 +2139,17 @@ export default function App() {
           <div className="animate-fadeIn w-full relative" id="screen-scan">
             {!scanResult ? (
               <div className="-mt-4 flex flex-col items-center w-full">
-                {/* 1. Universal Quick Scan Header (mockup 1 & 2 consistent) */}
-                <div className="w-full flex items-start gap-4 px-5 py-5 bg-zinc-950/20">
+                {/* 1. Universal Quick Scan Header (mockup 1 & 2 consistent) - Clean transparent header */}
+                <div className="w-full flex items-center gap-3 px-5 py-5">
                   <button 
                     onClick={() => setActiveTab("crops")}
-                    className="mt-1 text-zinc-400 hover:text-white transition-all p-1.5 rounded-full hover:bg-zinc-800/50 flex items-center justify-center active:scale-95 cursor-pointer"
+                    className="text-on-surface-variant hover:text-on-surface transition-all p-1.5 rounded-full hover:bg-surface-container flex items-center justify-center active:scale-95 cursor-pointer"
                   >
                     <span className="material-symbols-outlined text-lg">arrow_back</span>
                   </button>
-                  <div>
-                    <div className="flex items-center gap-1.5">
-                      <span className="material-symbols-outlined text-amber-500 text-xl font-bold leading-none">bolt</span>
-                      <h2 className="text-xl font-extrabold text-zinc-100 font-sans tracking-tight leading-none text-left">Quick Scan</h2>
-                    </div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="material-symbols-outlined text-amber-500 text-xl font-bold leading-none">bolt</span>
+                    <h2 className="text-xl font-extrabold text-on-surface font-sans tracking-tight leading-none text-left">Quick Scan</h2>
                   </div>
                 </div>
 
@@ -1874,14 +2159,14 @@ export default function App() {
                     <div className="w-full px-5 mt-2">
                        <div className="w-full border border-dashed border-emerald-500/25 bg-emerald-950/[0.08] rounded-3xl p-8 flex flex-col items-center justify-center shadow-lg animate-fadeIn">
                         {/* Circle avatar with image icon */}
-                        <div className="w-16 h-16 rounded-full bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 mb-4 shadow-[0_4px_25px_rgba(16,185,129,0.15)] animate-pulse">
-                          <span className="material-symbols-outlined text-3.5xl">image</span>
+                        <div className="w-16 h-16 rounded-full bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-500 dark:text-emerald-400 mb-4 shadow-[0_4px_25px_rgba(16,185,129,0.15)] animate-pulse">
+                           <span className="material-symbols-outlined text-3.5xl">image</span>
                         </div>
                         
-                        <p className="text-zinc-300 text-xs font-bold text-center max-w-[260px] mb-2 leading-relaxed font-sans">
+                        <p className="text-on-surface-variant dark:text-zinc-300 text-xs font-bold text-center max-w-[260px] mb-2 leading-relaxed font-sans">
                           {t("takeOrUploadPhoto")}
                         </p>
-                        <p className="text-zinc-500 text-[10px] font-semibold text-center max-w-[210px] mb-6 font-sans">
+                        <p className="text-on-surface-variant/70 dark:text-zinc-500 text-[10px] font-semibold text-center max-w-[210px] mb-6 font-sans">
                           {t("supportsHighFidelity")}
                         </p>
                         
@@ -1897,7 +2182,7 @@ export default function App() {
                           
                           <button 
                             onClick={() => galleryInputRef.current?.click()}
-                            className="flex items-center justify-center gap-2 px-5 py-2.5 bg-zinc-900 border border-zinc-800 hover:bg-zinc-800 hover:border-zinc-700 text-zinc-300 font-sans text-xs font-semibold rounded-xl shadow-md cursor-pointer transition-all active:scale-95"
+                            className="flex items-center justify-center gap-2 px-5 py-2.5 bg-surface-container border border-outline-variant text-on-surface hover:bg-surface-container-high font-sans text-xs font-semibold rounded-xl shadow-md cursor-pointer transition-all active:scale-95"
                           >
                             <span className="material-symbols-outlined text-sm">file_upload</span>
                             <span>{t("gallery")}</span>
@@ -1999,21 +2284,21 @@ export default function App() {
               </div>
             ) : (
               <div className="px-5 mt-2 animate-fadeIn" id="screen-scan-result">
-                {/* Header with back button */}
-                <div className="w-full flex items-center gap-4 py-4 -mx-5 px-5 mb-4 border-b border-outline-variant/30 bg-zinc-950/20">
+                {/* Header with back button - Clean transparent header */}
+                <div className="w-full flex items-center gap-3 py-4 mb-4">
                   <button 
                     onClick={() => {
                       setScanResult(null);
                       setActiveScanningPortfolioId(null);
                       setSaveTargetPortfolioId("NEW");
                     }}
-                    className="text-zinc-400 hover:text-white transition-all p-1.5 rounded-full hover:bg-zinc-800/50 flex items-center justify-center active:scale-95 cursor-pointer"
+                    className="text-on-surface-variant hover:text-on-surface transition-all p-1.5 rounded-full hover:bg-surface-container flex items-center justify-center active:scale-95 cursor-pointer"
                     id="btn-scan-result-back"
                   >
                     <span className="material-symbols-outlined text-lg">arrow_back</span>
                   </button>
                   <div className="flex flex-col text-left">
-                    <h2 className="text-base font-extrabold text-zinc-100 font-sans tracking-tight leading-none">
+                    <h2 className="text-lg font-extrabold text-on-surface font-sans tracking-tight leading-none">
                       {appLanguage === "Español (ES)" ? "Resultado del Diagnóstico" : appLanguage === "Français (FR)" ? "Résultat du Diagnostic" : "Diagnostic Result"}
                     </h2>
                   </div>
@@ -2043,7 +2328,7 @@ export default function App() {
                   {/* Right Column: Information, Diagnosis Tabs & Content (Responsive) */}
                   <div className="md:col-span-7 flex flex-col w-full">
                     {/* Horizontal Navigation Pills (mockup icons list) */}
-                    <div className="grid grid-cols-5 p-1 bg-zinc-900 border border-zinc-800/80 rounded-2xl mb-4 gap-1 shadow-inner">
+                    <div className="grid grid-cols-5 p-1 bg-surface-container-high border border-outline-variant/80 rounded-2xl mb-4 gap-1 shadow-inner">
                   {[
                     { key: "identify", label: appLanguage === "Español (ES)" ? "Identificar" : appLanguage === "Français (FR)" ? "Identifier" : "Identify", icon: "eco" },
                     { key: "diseases", label: appLanguage === "Español (ES)" ? "Enfermedades" : appLanguage === "Français (FR)" ? "Maladies" : "Diseases", icon: "bug_report" },
@@ -2057,8 +2342,8 @@ export default function App() {
                       onClick={() => setActiveResultTab(tab.key as any)}
                       className={`py-2 px-0.5 rounded-xl flex flex-col items-center justify-center gap-0.5 transition-all outline-none ${
                         activeResultTab === tab.key 
-                          ? "bg-zinc-800 text-emerald-400 border border-emerald-500/10 shadow-md scale-[1.02]" 
-                          : "text-zinc-500 hover:text-zinc-300"
+                          ? "bg-surface-container-lowest text-emerald-600 dark:text-emerald-450 border border-outline-variant shadow-md scale-[1.02]" 
+                          : "text-on-surface-variant hover:text-on-surface"
                       }`}
                     >
                       <span className="material-symbols-outlined text-[18px]">{tab.icon}</span>
@@ -2072,30 +2357,30 @@ export default function App() {
                   {activeResultTab === "identify" && (
                     <div className="flex flex-col gap-3 animate-fadeIn">
                       {/* PLANT IDENTIFIED CARD */}
-                      <div className="bg-zinc-900/90 border border-zinc-800/60 rounded-2xl p-4 flex justify-between items-center shadow-md relative overflow-hidden">
-                        <div className="flex items-center gap-3">
-                          <div className="w-10 h-10 rounded-full bg-emerald-950/40 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
+                      <div className="bg-surface-container-lowest border border-outline-variant rounded-2xl p-4 flex justify-between items-center shadow-sm relative overflow-hidden">
+                        <div className="flex items-center gap-3 text-left">
+                          <div className="w-10 h-10 rounded-full bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-600 dark:text-emerald-400">
                             <span className="material-symbols-outlined text-[20px]">eco</span>
                           </div>
                           <div>
-                            <span className="text-[9px] font-black text-emerald-400 uppercase tracking-widest block leading-none">
+                            <span className="text-[9px] font-black text-emerald-600 dark:text-emerald-400 uppercase tracking-widest block leading-none">
                               {appLanguage === "Español (ES)" ? "Planta Identificada" : appLanguage === "Français (FR)" ? "Plante Identifiée" : "Plant Identified"}
                             </span>
-                            <h3 className="text-lg font-black text-white leading-tight font-sans mt-1">{scanResult.cropName || "Tomato"}</h3>
-                            <span className="text-[11px] font-semibold text-zinc-400 italic block mt-0.5">{scanResult.botanicalName || "Solanum lycopersicum"}</span>
+                            <h3 className="text-lg font-black text-on-surface leading-tight font-sans mt-1">{scanResult.cropName || "Tomato"}</h3>
+                            <span className="text-[11px] font-semibold text-on-surface-variant/85 italic block mt-0.5">{scanResult.botanicalName || "Solanum lycopersicum"}</span>
                           </div>
                         </div>
 
                         <div className="text-right">
-                          <div className="text-xl font-black text-emerald-400 block leading-none">{scanResult.confidence || "85%"}</div>
-                          <span className="text-[8px] text-zinc-500 font-bold tracking-wide uppercase mt-1 block">
+                          <div className="text-xl font-black text-emerald-600 dark:text-emerald-400 block leading-none">{scanResult.confidence || "85%"}</div>
+                          <span className="text-[8px] text-on-surface-variant font-bold tracking-wide uppercase mt-1 block">
                             {appLanguage === "Español (ES)" ? "Confianza" : appLanguage === "Français (FR)" ? "Confiance" : "Confidence"}
                           </span>
                         </div>
                       </div>
 
                       {/* HEALTH ASSESSMENT CARD */}
-                      <div className="bg-zinc-900/90 border border-zinc-800/60 rounded-2xl p-4 shadow-md flex items-center gap-4">
+                      <div className="bg-surface-container-lowest border border-outline-variant rounded-2xl p-4 shadow-sm flex items-center gap-4 text-left">
                         {/* Radial progress ring */}
                         <div className="relative w-12 h-12 flex items-center justify-center shrink-0">
                           <svg className="w-full h-full transform -rotate-90">
@@ -2103,7 +2388,7 @@ export default function App() {
                               cx="24"
                               cy="24"
                               r="20"
-                              className="stroke-zinc-800"
+                              className="stroke-outline-variant/40"
                               strokeWidth="4"
                               fill="transparent"
                             />
@@ -2113,8 +2398,8 @@ export default function App() {
                               r="20"
                               className={
                                 scanResult.healthStatus === "Healthy" 
-                                  ? "stroke-emerald-400" 
-                                  : (scanResult.healthStatus === "Pest Risk" || scanResult.healthStatus === "Warning" ? "stroke-amber-400" : "stroke-rose-500")
+                                  ? "stroke-emerald-500" 
+                                  : (scanResult.healthStatus === "Pest Risk" || scanResult.healthStatus === "Warning" ? "stroke-amber-500" : "stroke-rose-500")
                               }
                               strokeWidth="4"
                               fill="transparent"
@@ -2122,20 +2407,20 @@ export default function App() {
                               strokeDashoffset={(2 * Math.PI * 20) * (1 - (scanResult.healthScore || 40) / 100)}
                             />
                           </svg>
-                          <span className="absolute text-xs font-black text-white">{scanResult.healthScore || 40}</span>
+                          <span className="absolute text-xs font-black text-on-surface">{scanResult.healthScore || 40}</span>
                         </div>
 
-                        <div className="flex-1 min-w-0">
-                          <span className="text-[9px] text-zinc-500 font-black uppercase tracking-widest block leading-none">
+                        <div className="flex-1 min-w-0 text-left">
+                          <span className="text-[9px] text-on-surface-variant font-black uppercase tracking-widest block leading-none">
                             {appLanguage === "Español (ES)" ? "Evaluación de Salud" : appLanguage === "Français (FR)" ? "État de Santé" : "Health Assessment"}
                           </span>
                           <div className="flex items-center gap-2 mt-1.5 flex-wrap">
                             <span className={`px-2 py-0.5 rounded text-[8.5px] font-black tracking-wider leading-none uppercase ${
                               scanResult.healthStatus === "Healthy" 
-                                ? "bg-emerald-950/60 text-emerald-400 border border-emerald-500/25" 
+                                ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20" 
                                 : (scanResult.healthStatus === "Pest Risk" || scanResult.healthStatus === "Warning" 
-                                    ? "bg-amber-950/60 text-amber-500 border border-amber-500/25" 
-                                    : "bg-rose-950/60 text-rose-400 border border-rose-500/25")
+                                    ? "bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20" 
+                                    : "bg-rose-500/10 text-rose-600 dark:text-rose-450 border border-rose-500/20")
                             }`}>
                               {(() => {
                                 const status = scanResult.healthStatus || "Infected";
@@ -2157,7 +2442,7 @@ export default function App() {
                                 return status;
                               })()}
                             </span>
-                            <span className="text-zinc-300 text-xs font-bold">
+                            <span className="text-on-surface-variant text-xs font-bold">
                               {(scanResult.healthScore || 40)}/100 {appLanguage === "Español (ES)" ? "puntuación de salud" : appLanguage === "Français (FR)" ? "score de santé" : "health score"}
                             </span>
                           </div>
@@ -2165,19 +2450,19 @@ export default function App() {
                       </div>
 
                       {/* PLANT FAMILY CARD */}
-                      <div className="bg-zinc-900/90 border border-zinc-800/60 rounded-2xl p-4 shadow-md">
-                        <span className="text-[9px] text-zinc-500 font-black uppercase tracking-widest block leading-none">
+                      <div className="bg-surface-container-lowest border border-outline-variant rounded-2xl p-4 shadow-sm text-left">
+                        <span className="text-[9px] text-on-surface-variant font-black uppercase tracking-widest block leading-none">
                           {appLanguage === "Español (ES)" ? "Familia de Planta" : appLanguage === "Français (FR)" ? "Famille de la Plante" : "Plant Family"}
                         </span>
-                        <p className="text-base font-extrabold text-white font-sans mt-1.5 leading-none">{scanResult.plantFamily || "Solanaceae"}</p>
+                        <p className="text-base font-extrabold text-on-surface font-sans mt-1.5 leading-none">{scanResult.plantFamily || "Solanaceae"}</p>
                       </div>
 
                       {/* ABOUT THIS PLANT */}
-                      <div className="bg-zinc-900/90 border border-zinc-800/60 rounded-2xl p-4 shadow-md">
-                        <span className="text-[9px] text-zinc-500 font-black uppercase tracking-widest block leading-none mb-1.5">
+                      <div className="bg-surface-container-lowest border border-outline-variant rounded-2xl p-4 shadow-sm text-left">
+                        <span className="text-[9px] text-on-surface-variant font-black uppercase tracking-widest block leading-none mb-1.5">
                           {appLanguage === "Español (ES)" ? "Sobre esta Planta" : appLanguage === "Français (FR)" ? "À Propos de la Plante" : "About This Plant"}
                         </span>
-                        <p className="text-xs text-zinc-300 leading-relaxed font-semibold">
+                        <p className="text-xs text-on-surface-variant leading-relaxed font-semibold">
                           {scanResult.aboutPlant || "Tomatoes are popular annual plants from the Solanaceae family grown for their edible fruit. They typically produce rich green foliage and small yellow flowers, followed by the characteristic red fruits."}
                         </p>
                       </div>
@@ -2186,57 +2471,57 @@ export default function App() {
 
                   {activeResultTab === "diseases" && (
                     <div className="flex flex-col gap-3 animate-fadeIn">
-                      {/* PATHOLOGY DETAILS CARD */}
-                      <div className="bg-zinc-900/90 border border-zinc-800/60 rounded-2xl p-4 shadow-md">
-                        <div className="flex items-center gap-1.5 text-rose-400 mb-2.5">
+                       {/* PATHOLOGY DETAILS CARD */}
+                      <div className="bg-surface-container-lowest border border-outline-variant rounded-2xl p-4 shadow-sm text-left">
+                        <div className="flex items-center gap-1.5 text-rose-500 dark:text-rose-450 mb-2.5">
                           <span className="material-symbols-outlined text-[18px]">bug_report</span>
                           <span className="text-[9px] font-black uppercase tracking-widest leading-none">
                             {appLanguage === "Español (ES)" ? "INFORME DE PATOLOGÍA DE DIAGNÓSTICO" : appLanguage === "Français (FR)" ? "RAPPORT DIAGNOSTIC PATHOLOGIQUE" : "Diagnostic Pathology Report"}
                           </span>
                         </div>
 
-                        <h3 className="text-base font-black text-white mb-2 leading-snug">
-                          {appLanguage === "Español (ES)" ? "Estado: " : appLanguage === "Français (FR)" ? "Statut: " : "Status: "} <span className="text-rose-400">{scanResult.pestOrDisease}</span>
+                        <h3 className="text-base font-black text-on-surface mb-2 leading-snug">
+                          {appLanguage === "Español (ES)" ? "Estado: " : appLanguage === "Français (FR)" ? "Statut: " : "Status: "} <span className="text-rose-500 dark:text-rose-400 font-extrabold">{scanResult.pestOrDisease}</span>
                         </h3>
 
                         <div className="flex gap-2 items-center mb-3">
-                          <span className={`px-2 py-0.5 rounded text-[8.5px] font-black uppercase tracking-wider bg-zinc-800 ${
-                            scanResult.severity === "High" || scanResult.severity === "Critical" ? "text-rose-400 border border-rose-500/20" : "text-amber-400 border border-amber-500/20"
+                          <span className={`px-2 py-0.5 rounded text-[8.5px] font-black uppercase tracking-wider bg-surface-container border border-outline-variant/60 ${
+                            scanResult.severity === "High" || scanResult.severity === "Critical" ? "text-rose-600 dark:text-rose-400" : "text-amber-600 dark:text-amber-450"
                           }`}>
                             {appLanguage === "Español (ES)" ? "Severidad: " : appLanguage === "Français (FR)" ? "Gravité: " : "Severity: "} 
                             {(() => {
                               const sev = scanResult.severity || "Medium";
                               if (appLanguage === "Español (ES)") {
                                 if (sev === "None") return "Ninguna";
-                                if (sev === "Low") return "Baja";
-                                if (sev === "Medium") return "Media";
-                                if (sev === "High") return "Alta";
-                                if (sev === "Critical") return "Crítica";
-                                return sev;
+                                  if (sev === "Low") return "Baja";
+                                  if (sev === "Medium") return "Media";
+                                  if (sev === "High") return "Alta";
+                                  if (sev === "Critical") return "Crítica";
+                                  return sev;
                               } else if (appLanguage === "Français (FR)") {
                                 if (sev === "None") return "Aucune";
-                                if (sev === "Low") return "Faible";
-                                if (sev === "Medium") return "Moyenne";
-                                if (sev === "High") return "Élevée";
-                                if (sev === "Critical") return "Critique";
-                                return sev;
+                                  if (sev === "Low") return "Faible";
+                                  if (sev === "Medium") return "Moyenne";
+                                  if (sev === "High") return "Élevée";
+                                  if (sev === "Critical") return "Critique";
+                                  return sev;
                               }
                               return sev;
                             })()}
                           </span>
-                          <span className="text-[10px] text-zinc-400 font-semibold">
+                          <span className="text-[10px] text-on-surface-variant/80 font-semibold">
                             {appLanguage === "Español (ES)" ? "Alerta de vector de infección activada" : appLanguage === "Français (FR)" ? "Alerte de propagation générée" : "Infection vector alert triggered"}
                           </span>
                         </div>
 
-                        <p className="text-xs text-zinc-300 leading-relaxed font-semibold border-t border-zinc-800/60 pt-3 mt-1.5">
+                        <p className="text-xs text-on-surface-variant leading-relaxed font-semibold border-t border-outline-variant/60 pt-3 mt-1.5">
                           {scanResult.description}
                         </p>
 
                         {scanResult.diagnosedVia && (
-                          <div className="mt-4 pt-3 border-t border-dashed border-zinc-800 flex items-center justify-between text-[10px] text-zinc-500">
+                          <div className="mt-4 pt-3 border-t border-dashed border-outline-variant/60 flex items-center justify-between text-[10px] text-on-surface-variant">
                             <span>{appLanguage === "Español (ES)" ? "Motor de Diagnóstico:" : appLanguage === "Français (FR)" ? "Moteur de Diagnostic:" : "Diagnostics Engine:"}</span>
-                            <span className="font-mono bg-zinc-850 px-2 py-0.5 rounded border border-zinc-800/80 text-emerald-400 font-semibold">{scanResult.diagnosedVia}</span>
+                            <span className="font-mono bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20 text-emerald-600 dark:text-emerald-400 font-bold">{scanResult.diagnosedVia}</span>
                           </div>
                         )}
                       </div>
@@ -2244,9 +2529,9 @@ export default function App() {
                   )}
 
                   {activeResultTab === "solutions" && (
-                    <div className="flex flex-col gap-3 animate-fadeIn">
-                      <div className="bg-zinc-900/90 border border-zinc-800/60 rounded-2xl p-4 shadow-md">
-                        <div className="flex items-center gap-1.5 text-emerald-400 mb-3.5">
+                    <div className="flex flex-col gap-3 animate-fadeIn text-left">
+                      <div className="bg-surface-container-lowest border border-outline-variant rounded-2xl p-4 shadow-sm">
+                        <div className="flex items-center gap-1.5 text-emerald-600 dark:text-emerald-450 mb-3.5">
                           <span className="material-symbols-outlined text-[18px]">healing</span>
                           <span className="text-[9px] font-black uppercase tracking-widest leading-none">
                             {appLanguage === "Español (ES)" ? "Protocolo de Tratamiento Agrónomo" : appLanguage === "Français (FR)" ? "Protocole de Traitement" : "Agronomy Treatment Protocol"}
@@ -2255,11 +2540,11 @@ export default function App() {
 
                         <ul className="flex flex-col gap-2.5">
                           {scanResult.solutions.map((sol: string, idx: number) => (
-                            <li key={idx} className="flex gap-3 bg-zinc-850/40 p-3 rounded-xl border border-zinc-800/30 items-start">
-                              <div className="w-5.5 h-5.5 rounded-full bg-emerald-950/60 border border-emerald-500/20 text-emerald-400 font-mono text-[10px] font-black flex items-center justify-center shrink-0 mt-0.5">
+                            <li key={idx} className="flex gap-3 bg-surface-container border border-outline-variant/65 p-3 rounded-xl items-start">
+                              <div className="w-5.5 h-5.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-650 dark:text-emerald-400 font-mono text-[10px] font-black flex items-center justify-center shrink-0 mt-0.5">
                                 {idx + 1}
                               </div>
-                              <p className="text-xs text-zinc-200 font-semibold leading-normal">{sol}</p>
+                              <p className="text-xs text-on-surface-variant font-semibold leading-normal">{sol}</p>
                             </li>
                           ))}
                         </ul>
@@ -2268,9 +2553,9 @@ export default function App() {
                   )}
 
                   {activeResultTab === "pruning" && (
-                    <div className="flex flex-col gap-3 animate-fadeIn">
-                      <div className="bg-zinc-900/90 border border-zinc-800/60 rounded-2xl p-4 shadow-md">
-                        <div className="flex items-center gap-1.5 text-sky-400 mb-3.5">
+                    <div className="flex flex-col gap-3 animate-fadeIn text-left">
+                      <div className="bg-surface-container-lowest border border-outline-variant rounded-2xl p-4 shadow-sm">
+                        <div className="flex items-center gap-1.5 text-sky-600 dark:text-sky-400 mb-3.5">
                           <span className="material-symbols-outlined text-[18px]">content_cut</span>
                           <span className="text-[9px] font-black uppercase tracking-widest leading-none">
                             {appLanguage === "Español (ES)" ? "Consejos de Poda Agronómica" : appLanguage === "Français (FR)" ? "Conseils de Taille" : "Agronomic Pruning Tips"}
@@ -2293,11 +2578,11 @@ export default function App() {
                               "Thin out overlapping leaf clusters to ensure healthy exposure to fresh airflow."
                             ]
                           )).map((tip: string, idx: number) => (
-                            <li key={idx} className="flex gap-3 bg-zinc-850/40 p-3 rounded-xl border border-zinc-800/30 items-start">
-                              <div className="w-5.5 h-5.5 rounded-full bg-sky-950/60 border border-sky-500/20 text-sky-400 font-mono text-[10px] font-black flex items-center justify-center shrink-0 mt-0.5">
+                            <li key={idx} className="flex gap-3 bg-surface-container border border-outline-variant/65 p-3 rounded-xl items-start">
+                              <div className="w-5.5 h-5.5 rounded-full bg-sky-500/10 border border-sky-500/20 text-sky-655 dark:text-sky-400 font-mono text-[10px] font-black flex items-center justify-center shrink-0 mt-0.5">
                                 {idx + 1}
                               </div>
-                              <p className="text-xs text-zinc-200 font-semibold leading-normal">{tip}</p>
+                              <p className="text-xs text-on-surface-variant font-semibold leading-normal">{tip}</p>
                             </li>
                           ))}
                         </ul>
@@ -2306,9 +2591,9 @@ export default function App() {
                   )}
 
                   {activeResultTab === "care" && (
-                    <div className="flex flex-col gap-3 animate-fadeIn">
-                      <div className="bg-zinc-900/90 border border-zinc-800/60 rounded-2xl p-4 shadow-md">
-                        <div className="flex items-center gap-1.5 text-teal-400 mb-3.5">
+                    <div className="flex flex-col gap-3 animate-fadeIn text-left">
+                      <div className="bg-surface-container-lowest border border-outline-variant rounded-2xl p-4 shadow-sm">
+                        <div className="flex items-center gap-1.5 text-teal-600 dark:text-teal-400 mb-3.5">
                           <span className="material-symbols-outlined text-[18px]">spa</span>
                           <span className="text-[9px] font-black uppercase tracking-widest leading-none">
                             {appLanguage === "Español (ES)" ? "Estrategia de Cuidado de Cultivo" : appLanguage === "Français (FR)" ? "Conseils de Sereine Culture" : "Farming Care Strategy"}
@@ -2331,11 +2616,11 @@ export default function App() {
                               "Supplement high minerals or specialized fertilizer (NPK / Calcium) depending on crop cycle."
                             ]
                           )).map((tip: string, idx: number) => (
-                            <li key={idx} className="flex gap-3 bg-zinc-850/40 p-3 rounded-xl border border-zinc-800/30 items-start">
-                              <div className="w-5.5 h-5.5 rounded-full bg-teal-950/60 border border-teal-500/20 text-teal-400 font-mono text-[10px] font-black flex items-center justify-center shrink-0 mt-0.5">
+                            <li key={idx} className="flex gap-3 bg-surface-container border border-outline-variant/65 p-3 rounded-xl items-start">
+                              <div className="w-5.5 h-5.5 rounded-full bg-teal-500/10 border border-teal-500/20 text-teal-655 dark:text-teal-400 font-mono text-[10px] font-black flex items-center justify-center shrink-0 mt-0.5">
                                 {idx + 1}
                               </div>
-                              <p className="text-xs text-zinc-200 font-semibold leading-normal">{tip}</p>
+                              <p className="text-xs text-on-surface-variant font-semibold leading-normal">{tip}</p>
                             </li>
                           ))}
                         </ul>
@@ -2361,17 +2646,17 @@ export default function App() {
         {activeTab === "settings" && (
           <div className="px-5 animate-fadeIn pb-12" id="screen-settings">
             
-            {/* Settings Header with Back Button */}
-            <div className="w-full flex items-center gap-4 py-4 -mx-5 px-5 mb-5 border-b border-outline-variant/30 bg-zinc-950/20">
+            {/* Settings Header with Back Button - Clean transparent header */}
+            <div className="w-full flex items-center gap-3 py-4 mb-5">
               <button 
                 onClick={() => setActiveTab("crops")}
-                className="text-zinc-400 hover:text-white transition-all p-1.5 rounded-full hover:bg-zinc-800/50 flex items-center justify-center active:scale-95 cursor-pointer"
+                className="text-on-surface-variant hover:text-on-surface transition-all p-1.5 rounded-full hover:bg-surface-container flex items-center justify-center active:scale-95 cursor-pointer"
                 id="btn-settings-back"
               >
                 <span className="material-symbols-outlined text-lg">arrow_back</span>
               </button>
               <div className="flex flex-col text-left">
-                <h2 className="text-base font-extrabold text-zinc-100 font-sans tracking-tight leading-none">
+                <h2 className="text-lg font-extrabold text-on-surface font-sans tracking-tight leading-none">
                   {appLanguage === "Español (ES)" ? "Ajustes" : appLanguage === "Français (FR)" ? "Paramètres" : "Settings"}
                 </h2>
               </div>
@@ -2422,59 +2707,71 @@ export default function App() {
                         value={tempName} 
                         onChange={(e) => setTempName(e.target.value)} 
                         placeholder="Thomas Miller"
-                        disabled={!!user}
-                        className="w-full h-8 px-2 bg-surface-container border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary rounded-lg text-xs outline-none font-bold disabled:opacity-55"
+                        className="w-full h-8 px-2 bg-surface-container border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary rounded-lg text-xs outline-none font-bold"
                       />
                       <input 
                         type="email" 
                         value={tempEmail} 
                         onChange={(e) => setTempEmail(e.target.value)} 
                         placeholder="t.miller@greenfield.farm"
-                        disabled={!!user}
+                        disabled={!!user} // Email editing is disabled for auth providers to preserve login links
                         className="w-full h-8 px-2 bg-surface-container border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary rounded-lg text-xs outline-none disabled:opacity-55"
                       />
                     </div>
                   )}
 
                   <div className="flex-shrink-0">
-                    {!user ? (
-                      !isEditingProfile ? (
+                    {!isEditingProfile ? (
+                      <button 
+                        onClick={() => {
+                          setTempName(currentUserName);
+                          setTempEmail(currentUserEmail);
+                          setIsEditingProfile(true);
+                        }}
+                        className="w-10 h-10 rounded-full flex items-center justify-center hover:bg-surface-container-high transition-all active:scale-95 text-outline"
+                      >
+                        <span className="material-symbols-outlined text-lg">edit</span>
+                      </button>
+                    ) : (
+                      <div className="flex flex-col gap-1">
                         <button 
-                          onClick={() => {
-                            setTempName(currentUserName);
-                            setTempEmail(currentUserEmail);
-                            setIsEditingProfile(true);
-                          }}
-                          className="w-10 h-10 rounded-full flex items-center justify-center hover:bg-surface-container-high transition-all active:scale-95 text-outline"
-                        >
-                          <span className="material-symbols-outlined text-lg">edit</span>
-                        </button>
-                      ) : (
-                        <div className="flex flex-col gap-1">
-                          <button 
-                            onClick={() => {
-                              if (tempName.trim() && tempEmail.trim()) {
-                                setUserName(tempName);
-                                setUserEmail(tempEmail);
-                                setIsEditingProfile(false);
-                                showToast("Profile details updated successfully", "success");
+                          onClick={async () => {
+                            if (tempName.trim() && tempEmail.trim()) {
+                              setUserName(tempName);
+                              setUserEmail(tempEmail);
+                              localStorage.setItem("agriscan_profile_name", tempName);
+                              localStorage.setItem("agriscan_profile_email", tempEmail);
+
+                              if (auth.currentUser) {
+                                try {
+                                  await updateProfile(auth.currentUser, {
+                                    displayName: tempName
+                                  });
+                                  showToast("Cloud profile updated safely!", "success");
+                                } catch (e: any) {
+                                  console.error("Firebase updateProfile failed:", e);
+                                  showToast("Profile details updated successfully", "success");
+                                }
                               } else {
-                                showToast("Name and email cannot be empty", "error");
+                                showToast("Profile details updated successfully", "success");
                               }
-                            }}
-                            className="px-2 py-1 bg-primary text-white font-bold text-[10px] rounded-lg active:scale-95 transition-all text-center"
-                          >
-                            Save
-                          </button>
-                          <button 
-                            onClick={() => setIsEditingProfile(false)}
-                            className="px-2 py-1 bg-surface-container-high text-on-surface-variant font-bold text-[10px] rounded-lg active:scale-95 transition-all text-center"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      )
-                    ) : null}
+                              setIsEditingProfile(false);
+                            } else {
+                              showToast("Name and email cannot be empty", "error");
+                            }
+                          }}
+                          className="px-2 py-1 bg-primary text-white font-bold text-[10px] rounded-lg active:scale-95 transition-all text-center"
+                        >
+                          Save
+                        </button>
+                        <button 
+                          onClick={() => setIsEditingProfile(false)}
+                          className="px-2 py-1 bg-surface-container-high text-on-surface-variant font-bold text-[10px] rounded-lg active:scale-95 transition-all text-center"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -2487,7 +2784,10 @@ export default function App() {
               <h3 className="text-xs font-bold text-tertiary mb-2 px-1 uppercase tracking-wider">Account Settings</h3>
               <div className="bg-surface-container-lowest rounded-2xl border border-outline-variant overflow-hidden shadow-sm">
                 <div 
-                  onClick={() => showToast("Personal Information setup is fully managed via secure Greenfield API", "info")}
+                  onClick={() => {
+                    setTempPersonalInfo({ ...personalInfo });
+                    setIsPersonalInfoOpen(true);
+                  }}
                   className="flex items-center justify-between p-4 border-b border-outline-variant hover:bg-surface-container-low transition-all cursor-pointer active:bg-surface-container"
                 >
                   <div className="flex items-center gap-3">
@@ -2498,7 +2798,12 @@ export default function App() {
                 </div>
                 
                 <div 
-                  onClick={() => showToast("Identity credentials and multi-factor auth require Greenfield portal access", "info")}
+                  onClick={() => {
+                    setNewPassword("");
+                    setConfirmPassword("");
+                    setTempPin(pinCode);
+                    setIsSecurityOpen(true);
+                  }}
                   className="flex items-center justify-between p-4 hover:bg-surface-container-low transition-all cursor-pointer active:bg-surface-container"
                 >
                   <div className="flex items-center gap-3">
@@ -2981,6 +3286,470 @@ export default function App() {
         </div>
       )}
 
+      {/* Personal Information Overlay Drawer */}
+      {isPersonalInfoOpen && (
+        <div className="fixed inset-x-0 bottom-0 top-0 bg-black/60 backdrop-blur-sm z-50 flex items-end justify-center px-4 animate-fadeIn" id="personal-info-drawer">
+          <div className="bg-surface-container-lowest rounded-t-3xl max-w-md w-full h-[80vh] flex flex-col shadow-2xl overflow-hidden border-t-4 border-emerald-500 animate-slideUp">
+            
+            {/* Drawer Header */}
+            <div className="p-4 bg-surface border-b border-outline-variant flex justify-between items-center shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-full bg-emerald-100 dark:bg-emerald-950/40 flex items-center justify-center border border-emerald-200 dark:border-emerald-800/30 shrink-0">
+                  <span className="material-symbols-outlined text-emerald-600 dark:text-emerald-400 text-base">person</span>
+                </div>
+                <div>
+                  <h4 className="text-sm font-black text-primary">Personal Information</h4>
+                  <p className="text-[10px] text-on-surface-variant font-medium font-sans">Manage your active dynamic profile details</p>
+                </div>
+              </div>
+              
+              <button 
+                type="button"
+                onClick={() => setIsPersonalInfoOpen(false)}
+                className="w-8 h-8 rounded-full bg-surface-container flex items-center justify-center text-outline hover:text-black transition-all"
+                id="btn-close-personal-info"
+              >
+                <span className="material-symbols-outlined text-sm font-bold">close</span>
+              </button>
+            </div>
+
+            {/* Scrollable Form Body */}
+            <form 
+              onSubmit={(e) => {
+                e.preventDefault();
+                setPersonalInfo(tempPersonalInfo);
+                localStorage.setItem("agriscan_personal_info", JSON.stringify(tempPersonalInfo));
+                // Sync name to top profile card too
+                if (tempPersonalInfo.fullName) {
+                  setUserName(tempPersonalInfo.fullName);
+                  setTempName(tempPersonalInfo.fullName);
+                  localStorage.setItem("agriscan_profile_name", tempPersonalInfo.fullName);
+                }
+                showToast("Personal Details updated successfully!", "success");
+                setIsPersonalInfoOpen(false);
+              }}
+              className="flex-grow p-4 overflow-y-auto flex flex-col gap-5 bg-surface-container-lowest no-scrollbar"
+            >
+              <div className="flex flex-col gap-1.5">
+                <label className="text-[10px] font-black uppercase tracking-wider text-on-surface-variant font-bold">Full Name</label>
+                <input 
+                  type="text" 
+                  value={tempPersonalInfo.fullName}
+                  onChange={(e) => setTempPersonalInfo(prev => ({ ...prev, fullName: e.target.value }))}
+                  required
+                  className="w-full h-11 px-3 bg-surface border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary rounded-xl text-xs outline-none font-semibold transition-all"
+                />
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <label className="text-[10px] font-black uppercase tracking-wider text-on-surface-variant font-bold">Phone Number</label>
+                <input 
+                  type="text" 
+                  value={tempPersonalInfo.phone}
+                  onChange={(e) => setTempPersonalInfo(prev => ({ ...prev, phone: e.target.value }))}
+                  required
+                  className="w-full h-11 px-3 bg-surface border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary rounded-xl text-xs outline-none font-semibold transition-all"
+                />
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <label className="text-[10px] font-black uppercase tracking-wider text-on-surface-variant font-bold">Farming Region / Country</label>
+                <input 
+                  type="text" 
+                  value={tempPersonalInfo.region}
+                  onChange={(e) => setTempPersonalInfo(prev => ({ ...prev, region: e.target.value }))}
+                  required
+                  className="w-full h-11 px-3 bg-surface border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary rounded-xl text-xs outline-none font-semibold transition-all"
+                />
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <label className="text-[10px] font-black uppercase tracking-wider text-on-surface-variant font-bold">Primary Focus</label>
+                <select 
+                  value={tempPersonalInfo.farmingFocus}
+                  onChange={(e) => setTempPersonalInfo(prev => ({ ...prev, farmingFocus: e.target.value }))}
+                  className="w-full h-11 px-3 bg-surface border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary rounded-xl text-xs outline-none font-semibold transition-all"
+                >
+                  <option value="Maize & Soybeans">Maize & Soybeans</option>
+                  <option value="Tomato & Peppers">Tomato & Peppers</option>
+                  <option value="Cassava & Tuber Crops">Cassava & Tuber Crops</option>
+                  <option value="Mixed Agronomy Plot">Mixed Agronomy Plot</option>
+                  <option value="Orchards & Forestry">Orchards & Forestry</option>
+                  <option value="Vineyards & Horticulture">Vineyards & Horticulture</option>
+                </select>
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <label className="text-[10px] font-black uppercase tracking-wider text-on-surface-variant font-bold">Farm Acreage Size</label>
+                <input 
+                  type="text" 
+                  value={tempPersonalInfo.acreage}
+                  onChange={(e) => setTempPersonalInfo(prev => ({ ...prev, acreage: e.target.value }))}
+                  required
+                  className="w-full h-11 px-3 bg-surface border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary rounded-xl text-xs outline-none font-semibold transition-all"
+                />
+              </div>
+
+              {/* Action Button */}
+              <div className="mt-4 pt-4 border-t border-outline-variant shrink-0 flex gap-3">
+                <button 
+                  type="button" 
+                  onClick={() => setIsPersonalInfoOpen(false)}
+                  className="flex-1 py-3 bg-surface border border-outline-variant font-bold text-xs rounded-xl hover:bg-surface-container active:scale-95 transition-all text-center"
+                >
+                  Cancel
+                </button>
+                <button 
+                  type="submit" 
+                  className="flex-1 py-3 bg-primary text-white font-bold text-xs rounded-xl hover:bg-opacity-90 active:scale-95 transition-all text-center font-semibold shadow-sm"
+                >
+                  Save Details
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Security & Password Overlay Drawer */}
+      {isSecurityOpen && (
+        <div className="fixed inset-x-0 bottom-0 top-0 bg-black/60 backdrop-blur-sm z-50 flex items-end justify-center px-4 animate-fadeIn" id="security-drawer">
+          <div className="bg-surface-container-lowest rounded-t-3xl max-w-md w-full h-[85vh] flex flex-col shadow-2xl overflow-hidden border-t-4 border-emerald-500 animate-slideUp">
+            
+            {/* Drawer Header */}
+            <div className="p-4 bg-surface border-b border-outline-variant flex justify-between items-center shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-full bg-emerald-100 dark:bg-emerald-950/40 flex items-center justify-center border border-emerald-200 dark:border-emerald-800/30 shrink-0">
+                  <span className="material-symbols-outlined text-emerald-600 dark:text-emerald-400 text-base">security</span>
+                </div>
+                <div>
+                  <h4 className="text-sm font-black text-primary">Security & Passcode</h4>
+                  <p className="text-[10px] text-on-surface-variant font-medium font-sans">Manage app locks and credentials</p>
+                </div>
+              </div>
+              
+              <button 
+                type="button"
+                onClick={() => setIsSecurityOpen(false)}
+                className="w-8 h-8 rounded-full bg-surface-container flex items-center justify-center text-outline hover:text-black transition-all"
+                id="btn-close-security"
+              >
+                <span className="material-symbols-outlined text-sm font-bold">close</span>
+              </button>
+            </div>
+
+            {/* Content Body */}
+            <div className="flex-grow p-4 overflow-y-auto flex flex-col gap-6 bg-surface-container-lowest no-scrollbar">
+              
+              {/* App Passcode Lock Section */}
+              <div className="flex flex-col gap-3 p-4 bg-surface border border-outline-variant rounded-2xl shadow-sm">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h5 className="text-xs font-bold text-on-surface">Enable Lock Passcode PIN</h5>
+                    <p className="text-[9px] text-on-surface-variant mt-0.5 font-medium leading-relaxed">Require a 4-digit PIN when launching AgriScan AI</p>
+                  </div>
+                  <button 
+                    type="button"
+                    onClick={() => {
+                      const next = !isPinEnabled;
+                      setIsPinEnabled(next);
+                      localStorage.setItem("agriscan_pin_enabled", next ? "true" : "false");
+                      if (!next) {
+                        setPinCode("");
+                        setTempPin("");
+                        localStorage.removeItem("agriscan_pin_code");
+                        showToast("Passcode lock deactivated.", "info");
+                      } else {
+                        showToast("Please enter a 4-digit PIN below and save.", "info");
+                      }
+                    }}
+                    className={`w-10 h-6 rounded-full p-0.5 transition-all ${
+                      isPinEnabled ? "bg-primary flex justify-end" : "bg-outline-variant flex justify-start"
+                    }`}
+                  >
+                    <div className="w-5 h-5 bg-white rounded-full shadow-sm" />
+                  </button>
+                </div>
+
+                {isPinEnabled && (
+                  <div className="flex flex-col gap-2 mt-2 pt-2 border-t border-outline-variant/50 animate-fadeIn">
+                    <label className="text-[9px] font-black uppercase tracking-wider text-on-surface-variant font-bold">4-Digit Security PIN</label>
+                    <div className="flex gap-2">
+                      <input 
+                        type="password" 
+                        maxLength={4}
+                        placeholder="e.g. 1234"
+                        value={tempPin}
+                        onChange={(e) => setTempPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
+                        className="w-full h-10 px-3 bg-surface-container border border-outline-variant focus:border-primary rounded-xl text-center text-sm tracking-widest font-black outline-none transition-all"
+                      />
+                      <button 
+                        type="button"
+                        disabled={tempPin.length !== 4}
+                        onClick={() => {
+                          setPinCode(tempPin);
+                          localStorage.setItem("agriscan_pin_code", tempPin);
+                          showToast("Security Pass PIN updated successfully!", "success");
+                        }}
+                        className="px-4 bg-primary text-white text-xs font-bold rounded-xl active:scale-95 hover:bg-opacity-90 disabled:opacity-50 transition-all shrink-0"
+                      >
+                        Set PIN
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Login Method Banner */}
+              <div className="p-4 bg-surface border border-outline-variant rounded-2xl shadow-sm flex flex-col gap-2">
+                <h5 className="text-xs font-bold text-on-surface">Authentication Status</h5>
+                {user ? (
+                  <div className="flex flex-col gap-1 mt-1">
+                    <div className="flex items-center gap-1.5 text-[10px] text-emerald-600 font-bold">
+                      <span className="material-symbols-outlined text-[14px]">cloud_done</span>
+                      Logged in via {user.providerData.some(p => p.providerId === "google.com") ? "Google Single Sign-In" : "Email & Password"}
+                    </div>
+                    <p className="text-[9px] text-on-surface-variant font-medium leading-relaxed">Your account credentials protect and cloud-synchronize your AgriScan portfolios.</p>
+                  </div>
+                ) : (
+                  <div className="flex flex-col gap-1 mt-1">
+                    <div className="flex items-center gap-1.5 text-[10px] text-amber-600 font-bold">
+                      <span className="material-symbols-outlined text-[14px]">report_problem</span>
+                      Running as Guest / Offline mode
+                    </div>
+                    <p className="text-[9px] text-on-surface-variant font-medium leading-relaxed">Connect external credentials in Settings or sign up to activate Cloud backup protection.</p>
+                  </div>
+                )}
+              </div>
+
+              {/* Firebase Password Update Form */}
+              {user && user.providerData.some(p => p.providerId === "password") && (
+                <form 
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    if (!newPassword || newPassword.length < 6) {
+                      showToast("Password must be at least 6 characters long.", "error");
+                      return;
+                    }
+                    if (newPassword !== confirmPassword) {
+                      showToast("Passwords do not match.", "error");
+                      return;
+                    }
+                    setIsSecurityLoading(true);
+                    try {
+                      if (auth.currentUser) {
+                        await updatePassword(auth.currentUser, newPassword);
+                        showToast("Password updated successfully!", "success");
+                        setNewPassword("");
+                        setConfirmPassword("");
+                        setIsSecurityOpen(false);
+                      }
+                    } catch (err: any) {
+                      console.error("Firebase updatePassword error:", err);
+                      if (err.code === "auth/requires-recent-login") {
+                        showToast("Re-authenticate requested. Please log out and back in to change password.", "error");
+                      } else {
+                        showToast(err.message || "Failed to update password.", "error");
+                      }
+                    } finally {
+                      setIsSecurityLoading(false);
+                    }
+                  }}
+                  className="flex flex-col gap-4 p-4 bg-surface border border-outline-variant rounded-2xl shadow-sm"
+                >
+                  <h5 className="text-xs font-bold text-on-surface">Change Account Password</h5>
+                  
+                  <div className="flex flex-col gap-1">
+                    <label className="text-[9px] font-black uppercase tracking-wider text-on-surface-variant font-bold">New Password</label>
+                    <input 
+                      type="password" 
+                      required
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      className="w-full h-10 px-3 bg-surface-container border border-outline-variant focus:border-primary rounded-xl text-xs outline-none font-semibold transition-all"
+                    />
+                  </div>
+
+                  <div className="flex flex-col gap-1">
+                    <label className="text-[9px] font-black uppercase tracking-wider text-on-surface-variant font-bold">Confirm New Password</label>
+                    <input 
+                      type="password" 
+                      required
+                      value={confirmPassword}
+                      onChange={(e) => setConfirmPassword(e.target.value)}
+                      className="w-full h-10 px-3 bg-surface-container border border-outline-variant focus:border-primary rounded-xl text-xs outline-none font-semibold transition-all"
+                    />
+                  </div>
+
+                  <button 
+                    type="submit"
+                    disabled={isSecurityLoading}
+                    className="w-full py-2.5 bg-primary text-white text-xs font-bold rounded-xl active:scale-95 disabled:opacity-55 hover:bg-opacity-90 transition-all text-center mt-1 font-semibold"
+                  >
+                    {isSecurityLoading ? "Updating..." : "Update Password"}
+                  </button>
+                </form>
+              )}
+
+              {/* Google Managed Note */}
+              {user && user.providerData.some(p => p.providerId === "google.com") && (
+                <div className="p-4 bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-100 dark:border-emerald-900/20 rounded-2xl shadow-sm flex items-start gap-3">
+                  <span className="material-symbols-outlined text-emerald-600 dark:text-emerald-400 mt-0.5 shrink-0">verified_user</span>
+                  <div>
+                    <h5 className="text-xs font-bold text-emerald-800 dark:text-emerald-400">Enterprise Google SSO Security</h5>
+                    <p className="text-[10px] text-emerald-700 dark:text-emerald-500/80 mt-1 leading-relaxed font-sans">
+                      Your identity credentials, keys, and security parameters are fully managed by Google Auth. 
+                      Change password, enable two-factor setup, or passkeys inside your external Google Account parameters.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* Close Button */}
+              <button 
+                type="button" 
+                onClick={() => setIsSecurityOpen(false)}
+                className="w-full py-3 bg-surface border border-outline-variant font-bold text-xs rounded-xl hover:bg-surface-container active:scale-95 transition-all text-center mt-2 font-semibold"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* App Lock Passcode Screen */}
+      {isAppLocked && (
+        <div className="fixed inset-0 bg-surface z-[100] flex flex-col justify-center items-center px-6 animate-fadeIn">
+          <div className="max-w-xs w-full flex flex-col items-center gap-6">
+            <div className="w-16 h-16 rounded-full bg-emerald-100 dark:bg-emerald-950/40 flex items-center justify-center border border-emerald-200 dark:border-emerald-800/30">
+              <span className="material-symbols-outlined text-emerald-600 dark:text-emerald-400 text-3xl animate-pulse">lock</span>
+            </div>
+            
+            <div className="text-center">
+              <h1 className="text-xl font-bold font-sans text-on-surface">AgriScan AI Locked</h1>
+              <p className="text-xs text-on-surface-variant mt-1.5 font-medium">Please enter your 4-digit security PIN</p>
+            </div>
+
+            {/* Dots */}
+            <div className="flex gap-4 my-2">
+              {[0, 1, 2, 3].map((idx) => (
+                <div 
+                  key={idx} 
+                  className={`w-3.5 h-3.5 rounded-full border-2 border-primary transition-all duration-150 ${
+                    enteredPin.length > idx 
+                      ? "bg-primary scale-110" 
+                      : "bg-transparent"
+                  } ${pinError ? "border-error bg-error animate-shake" : ""}`}
+                />
+              ))}
+            </div>
+
+            {/* Custom Keypad */}
+            <div className="grid grid-cols-3 gap-4 w-full justify-items-center">
+              {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((num) => (
+                <button
+                  key={num}
+                  type="button"
+                  onClick={() => {
+                    if (enteredPin.length < 4) {
+                      const newPin = enteredPin + num;
+                      setEnteredPin(newPin);
+                      if (newPin === pinCode) {
+                        setTimeout(() => {
+                          setIsAppLocked(false);
+                          setEnteredPin("");
+                          showToast("Welcome back to AgriScan AI!", "success");
+                        }, 250);
+                      } else if (newPin.length === 4) {
+                        // Error
+                        setTimeout(() => {
+                          setPinError(true);
+                          showToast("Incorrect security PIN code.", "error");
+                          setTimeout(() => {
+                            setPinError(false);
+                            setEnteredPin("");
+                          }, 600);
+                        }, 200);
+                      }
+                    }
+                  }}
+                  className="w-16 h-16 rounded-full bg-surface-container-low hover:bg-surface-container-high text-on-surface font-sans font-bold text-lg flex items-center justify-center border border-outline-variant/50 transition-all active:scale-90"
+                >
+                  {num}
+                </button>
+              ))}
+              
+              {/* Clear */}
+              <button
+                type="button"
+                onClick={() => setEnteredPin("")}
+                className="w-16 h-16 rounded-full text-xs font-bold text-outline hover:text-on-surface flex items-center justify-center transition-all active:scale-90"
+              >
+                CLEAR
+              </button>
+
+              {/* Zero */}
+              <button
+                key={0}
+                type="button"
+                onClick={() => {
+                  if (enteredPin.length < 4) {
+                    const newPin = enteredPin + "0";
+                    setEnteredPin(newPin);
+                    if (newPin === pinCode) {
+                      setTimeout(() => {
+                        setIsAppLocked(false);
+                        setEnteredPin("");
+                        showToast("Welcome back to AgriScan AI!", "success");
+                      }, 250);
+                    } else if (newPin.length === 4) {
+                      setTimeout(() => {
+                        setPinError(true);
+                        showToast("Incorrect security PIN code.", "error");
+                        setTimeout(() => {
+                          setPinError(false);
+                          setEnteredPin("");
+                        }, 600);
+                      }, 200);
+                    }
+                  }
+                }}
+                className="w-16 h-16 rounded-full bg-surface-container-low hover:bg-surface-container-high text-on-surface font-sans font-bold text-lg flex items-center justify-center border border-outline-variant/50 transition-all active:scale-90"
+              >
+                0
+              </button>
+
+              {/* Backspace */}
+              <button
+                type="button"
+                onClick={() => {
+                  setEnteredPin(enteredPin.slice(0, -1));
+                }}
+                className="w-16 h-16 rounded-full bg-surface-container-lowest text-outline hover:text-on-surface flex items-center justify-center transition-all active:scale-90"
+              >
+                <span className="material-symbols-outlined">backspace</span>
+              </button>
+            </div>
+            
+            {/* Quick Guest Bypass / Logout */}
+            <button 
+              onClick={async () => {
+                if (auth.currentUser) {
+                  await signOut(auth);
+                  showToast("Signed out successfully.", "success");
+                }
+                setIsAppLocked(false);
+                setIsGuestMode(true);
+                localStorage.setItem("agriscan_guest_allowed", "true");
+              }}
+              className="text-xs text-primary font-bold hover:underline py-1 mt-4"
+            >
+              Log Out / Switch to Offline Guest
+            </button>
+          </div>
+        </div>
+      )}
 
 
       {/* BottomNavBar */}

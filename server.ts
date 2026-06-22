@@ -2,6 +2,11 @@ import express from "express";
 import path from "path";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
+import { db } from "./src/db/index.ts";
+import { users, portfolios, storageFiles } from "./src/db/schema.ts";
+import { getOrCreateUser } from "./src/db/users.ts";
+import { requireAuth, AuthRequest } from "./src/middleware/auth.ts";
+import { eq, desc, and } from "drizzle-orm";
 
 dotenv.config();
 
@@ -36,6 +41,186 @@ if (API_KEY && API_KEY !== "MY_GEMINI_API_KEY") {
 // REST route for testing
 app.get("/api/health", (req, res) => {
   res.json({ status: "healthy", apiInitialized: ai !== null });
+});
+
+// Sync User from Firebase Login State to Cloud SQL users table
+app.post("/api/users/sync", requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const userUid = req.user!.uid;
+    const email = req.user!.email || "";
+    const syncedUser = await getOrCreateUser(userUid, email);
+    res.json({ status: "success", user: syncedUser });
+  } catch (error: any) {
+    console.error("Error in /api/users/sync:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Retrieve all portfolios for the logged-in user
+app.get("/api/portfolios", requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const userUid = req.user!.uid;
+    const results = await db.select()
+      .from(portfolios)
+      .where(eq(portfolios.ownerId, userUid))
+      .orderBy(desc(portfolios.createdAt));
+    res.json(results);
+  } catch (error: any) {
+    console.error("Error in GET /api/portfolios:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Create a new crop portfolio
+app.post("/api/portfolios", requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const userUid = req.user!.uid;
+    const { id, name, lastScan, status, image, healthScore, moisture, estYield, scienceName, growthStage, statsHistory, activities, scanHistory, growthLogs } = req.body;
+    
+    if (!id || !name) {
+       return res.status(400).json({ error: "Missing required portfolio fields (id and name are mandatory)" });
+    }
+
+    const result = await db.insert(portfolios)
+      .values({
+        id,
+        ownerId: userUid,
+        name,
+        lastScan: lastScan || "",
+        status: status || "Healthy",
+        image: image || "",
+        healthScore: healthScore !== undefined ? healthScore : 100,
+        moisture: moisture !== undefined ? moisture : 50,
+        estYield: estYield || "",
+        scienceName: scienceName || "",
+        growthStage: growthStage || "Seedling",
+        statsHistory: statsHistory || [],
+        activities: activities || [],
+        scanHistory: scanHistory || [],
+        growthLogs: growthLogs || []
+      })
+      .returning();
+
+    res.json(result[0]);
+  } catch (error: any) {
+    console.error("Error in POST /api/portfolios:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update a specific crop portfolio
+app.put("/api/portfolios/:id", requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const userUid = req.user!.uid;
+    const portfolioId = req.params.id;
+    const { name, lastScan, status, image, healthScore, moisture, estYield, scienceName, growthStage, statsHistory, activities, scanHistory, growthLogs } = req.body;
+
+    const result = await db.update(portfolios)
+      .set({
+        name,
+        lastScan,
+        status,
+        image,
+        healthScore,
+        moisture,
+        estYield,
+        scienceName,
+        growthStage,
+        statsHistory,
+        activities,
+        scanHistory,
+        growthLogs
+      })
+      .where(and(eq(portfolios.id, portfolioId), eq(portfolios.ownerId, userUid)))
+      .returning();
+
+    if (!result.length) {
+      return res.status(404).json({ error: "Portfolio not found or unauthorized to update" });
+    }
+
+    res.json(result[0]);
+  } catch (error: any) {
+    console.error("Error in PUT /api/portfolios/:id:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Delete a specific crop portfolio
+app.delete("/api/portfolios/:id", requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const userUid = req.user!.uid;
+    const portfolioId = req.params.id;
+
+    const result = await db.delete(portfolios)
+      .where(and(eq(portfolios.id, portfolioId), eq(portfolios.ownerId, userUid)))
+      .returning();
+
+    if (!result.length) {
+      return res.status(404).json({ error: "Portfolio not found or unauthorized to delete" });
+    }
+
+    res.json({ success: true, deleted: result[0] });
+  } catch (error: any) {
+    console.error("Error in DELETE /api/portfolios/:id:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Upload media file to Supabase Cloud SQL storage bucket
+app.post("/api/storage/upload", requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const userUid = req.user!.uid;
+    const { fileName, mimeType, fileData } = req.body;
+
+    if (!fileName || !mimeType || !fileData) {
+      return res.status(400).json({ error: "Missing uploaded file components (fileName, mimeType, and fileData are required)" });
+    }
+
+    const fileId = "file_" + Math.random().toString(36).substring(2, 15);
+    
+    await db.insert(storageFiles)
+      .values({
+        id: fileId,
+        fileName,
+        mimeType,
+        fileData,
+        ownerId: userUid
+      })
+      .execute();
+
+    res.json({ url: `/api/storage/file/${fileId}`, fileId });
+  } catch (error: any) {
+    console.error("Error in POST /api/storage/upload:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Retrieve public media photo from storage bucket
+app.get("/api/storage/file/:id", async (req, res) => {
+  try {
+    const fileId = req.params.id;
+    const results = await db.select()
+      .from(storageFiles)
+      .where(eq(storageFiles.id, fileId))
+      .execute();
+
+    if (!results.length) {
+      return res.status(404).send("File not found in storage bucket");
+    }
+
+    const file = results[0];
+    let cleanBase64 = file.fileData;
+    if (cleanBase64.startsWith("data:")) {
+      cleanBase64 = cleanBase64.split(",")[1];
+    }
+    
+    const imageBuffer = Buffer.from(cleanBase64, "base64");
+    res.setHeader("Content-Type", file.mimeType);
+    res.send(imageBuffer);
+  } catch (error: any) {
+    console.error("Error in GET /api/storage/file/:id:", error);
+    res.status(500).send("Storage retrieval failed: " + error.message);
+  }
 });
 
 // Helper for high-fidelity offline agronomy heuristics simulation
