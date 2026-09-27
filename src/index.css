@@ -88,3 +88,17 @@ body {
 .no-scrollbar::-webkit-scrollbar { display: none; }
 .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
 
+/* Telegram Mini App Safe-Area & Viewport Adjustments */
+:root {
+  --tg-safe-area-inset-top: env(safe-area-inset-top, 0px);
+  --tg-safe-area-inset-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.tma-safe-top {
+  padding-top: max(env(safe-area-inset-top), 0.5rem);
+}
+
+.tma-safe-bottom {
+  padding-bottom: max(env(safe-area-inset-bottom), 1rem);
+}
+

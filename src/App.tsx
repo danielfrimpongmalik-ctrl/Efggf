@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import LoginPage from "./components/LoginPage";
+import { initTelegramMiniApp } from "./lib/telegram";
 import { initialCropPortfolios } from "./data";
 import { CropPortfolio, StatusType, Activity } from "./types";
 import { auth, handleFirestoreError, OperationType } from "./firebase";
@@ -740,9 +741,12 @@ export default function App() {
   const [enteredPin, setEnteredPin] = useState("");
   const [pinError, setPinError] = useState(false);
 
+  const [currentUserPhoto, setCurrentUserPhoto] = useState<string>(() => {
+    return "https://lh3.googleusercontent.com/aida-public/AB6AXuDfG1pC4cpXndz7muzlznPJE5uRod58oavdFKhU5Dtx9DA3c5Z5wtF_qJpoU3DvpI7oL6FZtEGI21vk7YlSOans4JtTFN1lwFFfTUNZg8R8X_3OZFo30lVWCEKvh4LwKZAoLTc2K9gFuLXBpZIBd4m-S3bab7x66qOV5seMVbuKH011cXeC2xwhmarowVss6ant2wFyQ-7xIwxI22t7_oOg7_BFiQOUlnQ1iwqPGEgkgbwu1Gbpg23KQWimG9fIvROzDc3A_XlFY9QJ";
+  });
+
   const currentUserName = userName;
   const currentUserEmail = userEmail;
-  const currentUserPhoto = "https://lh3.googleusercontent.com/aida-public/AB6AXuDfG1pC4cpXndz7muzlznPJE5uRod58oavdFKhU5Dtx9DA3c5Z5wtF_qJpoU3DvpI7oL6FZtEGI21vk7YlSOans4JtTFN1lwFFfTUNZg8R8X_3OZFo30lVWCEKvh4LwKZAoLTc2K9gFuLXBpZIBd4m-S3bab7x66qOV5seMVbuKH011cXeC2xwhmarowVss6ant2wFyQ-7xIwxI22t7_oOg7_BFiQOUlnQ1iwqPGEgkgbwu1Gbpg23KQWimG9fIvROzDc3A_XlFY9QJ";
   const [toast, setToast] = useState<{ message: string; type: "success" | "info" | "error" } | null>(null);
   const [pendingDeletePortfolioId, setPendingDeletePortfolioId] = useState<string | null>(null);
   const [pendingDeleteScanId, setPendingDeleteScanId] = useState<string | null>(null);
@@ -887,6 +891,13 @@ export default function App() {
       .catch(() => {
         setApiState({ initialized: false, loading: false });
       });
+  }, []);
+
+  // Telegram Mini App Initialization
+  useEffect(() => {
+    initTelegramMiniApp((colorScheme) => {
+      setAppTheme(colorScheme === "dark" ? "dark" : "light");
+    });
   }, []);
 
   const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1754,7 +1765,7 @@ export default function App() {
             <h1 className="font-sans text-xl font-bold text-primary tracking-tight">AgriScan AI</h1>
           </div>
           
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2.5">
             <div 
               onClick={() => {
                 setActiveTab("settings");
@@ -2883,8 +2894,6 @@ export default function App() {
                 </div>
               </div>
             </section>
-
-
 
             {/* Log Out button and storage reset */}
             <section className="mb-6">
